@@ -59,7 +59,7 @@ not arrived. So the largest recurring cost in this daemon is a sensor read for n
 
 Worth saying plainly what this is *not*: the walk policy's IMU is a different chip on a different
 bus — the `imu_to_dxl` v2 board on the Dynamixel bus, read in the same 50 Hz `sync_read` as the
-fifteen servos (`duck-control/src/bus.rs`, `duck-control/src/model.rs:76`). Nothing here touches
+fifteen servos (`duck-control/src/xl330/bus.rs`, `duck-control/src/model.rs:76`). Nothing here touches
 it, and nothing here can cost the policy an IMU sample.
 
 ## What was decided

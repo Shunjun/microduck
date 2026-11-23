@@ -21,6 +21,8 @@
 mod chorale;
 mod control;
 mod emotion;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod hardware;
 mod head_imu;
 mod idle_head;
 mod intents;
@@ -65,6 +67,12 @@ type PowerOff = Arc<dyn Fn() + Send + Sync>;
 /// sensor-input / actuator-output contract a model sees changes.
 // API 2 adds explicit recurrent state; API 1 feed-forward models remain supported.
 const MODEL_API: u32 = 2;
+
+//Compatible: change only this constant to select the motor protocol, then rebuild.
+const MOTOR_DRIVER: hardware::MotorDriver = hardware::MotorDriver::Feetech1910;
+#[cfg(target_os = "linux")]
+/// Feetech encoder/mount/unit calibration; IDs retain the original joint order.
+const FEETECH_CALIBRATION_PATH: &str = "/etc/robot/feetech1910.json";
 
 /// Socket mode. Same reasoning as `updaterd`'s: the group decides who may ask.
 const SOCKET_MODE: u32 = 0o660;
@@ -1172,7 +1180,7 @@ impl RobotState {
             return Some(format!(
                 "the IMU board (id {}) is not answering on the motor bus {after}; \
                  is it plugged in?",
-                duck_control::model::IMU_DXL_ID,
+                MOTOR_DRIVER.imu_id(),
             ));
         }
         None
@@ -1263,6 +1271,10 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
+    tracing::info!(
+        driver = MOTOR_DRIVER.name(),
+        "motor driver selected at build time"
+    );
     let explicit = args.params.is_some();
     let params_path = args
         .params
@@ -1300,6 +1312,16 @@ async fn main() -> ExitCode {
     }
     if args.no_policy {
         params.policy.enabled = false;
+    }
+
+    #[cfg(target_os = "linux")]
+    if MOTOR_DRIVER == hardware::MotorDriver::Feetech1910
+        && ((!args.fake && args.sim.is_none()) || args.command.is_some())
+        && let Err(error) =
+            hardware::load_feetech_config(std::path::Path::new(FEETECH_CALIBRATION_PATH))
+    {
+        tracing::error!(%error, "invalid Feetech calibration; no motor port was opened");
+        return ExitCode::FAILURE;
     }
 
     if let Some(Command::Init { duration }) = args.command {
@@ -1440,10 +1462,6 @@ fn run_init(params: &Params, duration: Duration) -> ExitCode {
     let Some(mut io) = opened else {
         return ExitCode::FAILURE;
     };
-    if let Err(e) = io.set_torque(true) {
-        tracing::error!(error = %e, "cannot enable torque");
-        return ExitCode::FAILURE;
-    }
     // Before the ramp, not after: position_p_gain is a RAM register that survives this
     // process, so whatever was written last is what the robot stands up with. A previous fall
     // leaves `gain_limp` (50) there, and `init` would then take the robot to its home pose at
@@ -1455,6 +1473,10 @@ fn run_init(params: &Params, duration: Duration) -> ExitCode {
     // robot is standing up unsupported.
     if let Err(e) = io.set_gain(params.policy.gain) {
         tracing::error!(error = %e, gain = params.policy.gain, "cannot set the position gain");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = io.set_torque(true) {
+        tracing::error!(error = %e, "cannot enable torque");
         return ExitCode::FAILURE;
     }
     if let Err(e) = io.interpolate_to(&DEFAULT_POSITION, duration, Duration::from_millis(20)) {
@@ -1627,7 +1649,7 @@ impl Drop for WaitingVoice {
 
 /// The real bus on the board; a fake elsewhere, so `open_bus_waiting` has one signature.
 #[cfg(target_os = "linux")]
-type BusIo = duck_control::bus::DynamixelIo;
+type BusIo = hardware::BusIo;
 #[cfg(not(target_os = "linux"))]
 type BusIo = FakeIo;
 
@@ -1729,18 +1751,16 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
 /// The body IMU's sensor→trunk mount on `board`: the power board stands on edge in a `zero3`
 /// and lies flat in a `beta`.
 fn body_imu_mount(board: robotd_params::board::Board) -> [f64; 4] {
-    use duck_control::imu::SflpDecoder;
+    use duck_control::xl330::imu::{BETA_MOUNT, DEFAULT_MOUNT};
     match board {
-        robotd_params::board::Board::Zero3 => SflpDecoder::DEFAULT_MOUNT,
-        robotd_params::board::Board::Beta | robotd_params::board::Board::FaceBoardV1 => {
-            SflpDecoder::BETA_MOUNT
-        }
+        robotd_params::board::Board::Zero3 => DEFAULT_MOUNT,
+        robotd_params::board::Board::Beta | robotd_params::board::Board::FaceBoardV1 => BETA_MOUNT,
     }
 }
 
 /// What `[bus]` asks the servos' impact guard to be: its six settings, or off.
-fn impact_guard(bus: &params::Bus) -> duck_control::model::ImpactGuard {
-    use duck_control::model::ImpactGuard;
+fn impact_guard(bus: &params::Bus) -> duck_control::xl330::config::ImpactGuard {
+    use duck_control::xl330::config::ImpactGuard;
     if !bus.impact_guard {
         return ImpactGuard::OFF;
     }
@@ -1766,7 +1786,24 @@ fn open_bus(
     let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
     let port = bus.port.as_str();
 
-    let mut io = match duck_control::bus::DynamixelIo::open(port, bus.fast_sync_read) {
+    if MOTOR_DRIVER == hardware::MotorDriver::Feetech1910 {
+        return match BusIo::open_feetech(port, std::path::Path::new(FEETECH_CALIBRATION_PATH)) {
+            Ok(io) => {
+                if loud {
+                    tracing::info!(port, "Feetech backend opened");
+                }
+                Some(io)
+            }
+            Err(error) => {
+                if loud {
+                    tracing::error!(%error, port, attempt, "cannot open Feetech backend; waiting");
+                }
+                None
+            }
+        };
+    }
+
+    let mut io = match duck_control::xl330::DynamixelIo::open(port, bus.fast_sync_read) {
         Ok(io) => io,
         Err(e) => {
             if loud {
@@ -1786,7 +1823,7 @@ fn open_bus(
     io.set_impact_guard(guard);
     if !bus.impact_guard && loud {
         tracing::info!("bus.impact_guard is off; guard servos run as the factory firmware");
-    } else if guard != duck_control::model::ImpactGuard::DEFAULT && loud {
+    } else if guard != duck_control::xl330::config::ImpactGuard::DEFAULT && loud {
         // Said once a start so a recording can be matched to the settings it ran on.
         tracing::warn!(?guard, "bus.impact_guard_* differ from the defaults");
     }
@@ -1809,7 +1846,7 @@ fn open_bus(
             return None;
         }
     }
-    Some(io)
+    Some(BusIo::Xl330(Box::new(io)))
 }
 
 /// Does the IMU board answer, now that every servo has?
@@ -1823,7 +1860,7 @@ fn open_bus(
 #[cfg(target_os = "linux")]
 fn imu_answers(io: &mut BusIo, attempt: u32) -> Option<bool> {
     let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
-    let id = duck_control::model::IMU_DXL_ID;
+    let id = MOTOR_DRIVER.imu_id();
     match io.imu_answers() {
         Ok(true) => Some(true),
         Ok(false) => {
@@ -1862,12 +1899,12 @@ fn imu_answers(_io: &mut BusIo, _attempt: u32) -> Option<bool> {
 /// cannot be told apart and is left to a human.
 #[cfg(target_os = "linux")]
 fn adopt_missing_servo(
-    io: &mut BusIo,
+    io: &mut duck_control::xl330::DynamixelIo,
     loud: bool,
     silent: &mut Vec<u8>,
     adopted: &mut Option<u8>,
 ) -> bool {
-    use duck_control::bus::replacement_target;
+    use duck_control::xl330::replacement_target;
 
     let missing = match io.missing_servos() {
         Ok(missing) => missing,
@@ -2487,8 +2524,8 @@ async fn control_loop<T: RobotIo>(
     match safety.servo_identity() {
         Ok(Some(ids)) => {
             state.vetbook.identify(&ids);
-            guarded =
-                ids.map(|s| duck_control::model::IMPACT_GUARD_FIRMWARES.contains(&s.firmware));
+            guarded = ids
+                .map(|s| duck_control::xl330::config::IMPACT_GUARD_FIRMWARES.contains(&s.firmware));
             let unguarded: Vec<_> = (0..NUM_JOINTS)
                 .filter(|&j| !guarded[j])
                 .map(|j| format!("{}={}", duck_control::JOINT_NAMES[j], ids[j].firmware))
@@ -2496,7 +2533,7 @@ async fn control_loop<T: RobotIo>(
             if !unguarded.is_empty() {
                 tracing::warn!(
                     servos = unguarded.join(" "),
-                    want = ?duck_control::model::IMPACT_GUARD_FIRMWARES,
+                    want = ?duck_control::xl330::config::IMPACT_GUARD_FIRMWARES,
                     "servo firmware without the impact guard"
                 );
             }
@@ -3079,7 +3116,7 @@ async fn control_loop<T: RobotIo>(
         // leg while one reboots is not a robot to leave standing.
         if let Some(ids) = intents.take_reboot_motors() {
             let ids: Vec<u8> = if ids.is_empty() {
-                duck_control::model::JOINT_IDS.to_vec()
+                hardware::JOINT_IDS.to_vec()
             } else {
                 ids
             };
@@ -8166,7 +8203,7 @@ mod tests {
         let (reboots, torque) = rx.recv().unwrap();
         assert_eq!(
             reboots.len(),
-            duck_control::model::JOINT_IDS.len(),
+            hardware::JOINT_IDS.len(),
             "every servo rebooted: {reboots:?}"
         );
         assert_eq!(torque, Some(false), "and left limp");
@@ -8996,7 +9033,7 @@ mod tests {
 
     /// Measured velocity and load must reach the state stream.
     ///
-    /// They arrive in the same twelve-byte block as position (`bus.rs`, register 124), so the
+    /// They arrive in the same twelve-byte block as position (`xl330/driver.rs`, register 124), so the
     /// loop has had them all along and only ever published position. A client outside the
     /// daemon cannot recover either one: differencing `joints` across frames is wrong for any
     /// subscriber that asked for a decimated rate, and load has no substitute at all.
@@ -9111,7 +9148,7 @@ mod tests {
     /// Servos on ROBOTIS's impact guard firmwares, V3 and one on V4, every one but the mouth
     /// here, with the guard holding after an impact.
     fn guarded_io() -> FakeIo {
-        use duck_control::model::{IMPACT_GUARD_ENABLE_FIRMWARE, IMPACT_GUARD_FIRMWARES};
+        use duck_control::xl330::config::{IMPACT_GUARD_ENABLE_FIRMWARE, IMPACT_GUARD_FIRMWARES};
         let mut io = FakeIo::at(DEFAULT_POSITION);
         let mut identity = [duck_control::io::ServoIdentity {
             model: 1200,
@@ -9128,7 +9165,7 @@ mod tests {
     /// as asked, and `impact_guard = false` is off whatever the six settings say.
     #[test]
     fn bus_params_pick_the_impact_guard() {
-        use duck_control::model::ImpactGuard;
+        use duck_control::xl330::config::ImpactGuard;
         let mut bus = params::Bus::default();
         assert_eq!(impact_guard(&bus), ImpactGuard::OFF);
         bus.impact_guard = true;

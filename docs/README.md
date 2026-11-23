@@ -44,6 +44,8 @@ own the mechanism is the bug.
 |---|---|
 | [`architecture.md`](design/architecture.md) | The service split, the IPC contract, state ownership, safety and authority. |
 | [`robotd-design.md`](design/robotd-design.md) | The control loop: the Dynamixel bus and who owns the port, the model, sensing, observations, policy, safety — and what else hangs off the tick. |
+| [`hardware-drivers.md`](design/hardware-drivers.md) | 两套实机驱动的文件职责、公共层与引用关系。 |
+| [`feetech-hardware.md`](design/feetech-hardware.md) | 飞特 HD1910 与 IMU firmware-1.0.0 后端、标定、只读检测及接入限制。 |
 | [`updater-design.md`](design/updater-design.md) | The update engine: verification, atomic swap, health gate, rollback, release format. |
 | [`policy-channel-design.md`](design/policy-channel-design.md) | Where the ONNX policies come from: the `policies` component, trying someone else's, and what `reset` puts back. |
 | [`restart-order.md`](design/restart-order.md) | Which unit restarts, at which step, on every path that moves `current` — and at boot. |

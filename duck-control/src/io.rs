@@ -19,7 +19,7 @@ pub struct Sensors {
     /// Joint velocities, rad/s.
     pub velocities: [f64; NUM_JOINTS],
     /// Present current magnitude, mA. The sign is dropped by whichever driver fills this —
-    /// [`crate::bus`] takes the absolute value as it unpacks the word — because what every
+    /// [`crate::xl330`] takes the absolute value as it unpacks the word — because what every
     /// consumer so far wants is load. It is not recoverable from `velocities`: a joint holding
     /// a squat or a foot taking weight is near-zero velocity at non-zero current.
     pub currents_ma: [f64; NUM_JOINTS],
@@ -213,7 +213,7 @@ pub trait RobotIo {
         Ok(None)
     }
 
-    /// Each servo's impact guard state (register 66 on [`crate::model::IMPACT_GUARD_FIRMWARES`]),
+    /// Each servo's impact guard state (register 66 on [`crate::xl330::config::IMPACT_GUARD_FIRMWARES`]),
     /// in joint order: 0 armed, 1 braking after an impact, 2 holding softly until the goal comes
     /// back past the position. A servo on any other firmware answers whatever its unused register
     /// holds, so the caller masks those out. A transaction of its own, about a millisecond.
@@ -240,7 +240,7 @@ pub trait RobotIo {
 /// Who answered a ping — see [`RobotIo::census`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Census {
-    /// Expected servo IDs ([`crate::model::JOINT_IDS`]) that did not answer, in that order.
+    /// Expected servo IDs ([`crate::JOINT_IDS`]) that did not answer, in that order.
     pub missing: Vec<u8>,
     /// Whether the IMU board answered.
     pub imu_answers: bool,

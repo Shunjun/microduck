@@ -5257,7 +5257,7 @@ pub struct RobotState {
     /// Present current magnitude per joint, mA, indexed as [`JOINT_NAMES`].
     ///
     /// Magnitude, not a signed current: the sign is dropped in the bus driver
-    /// (`duck_control::bus`, the `.abs()` on the present-current word), not in the control
+    /// (`duck_control::xl330`, the `.abs()` on the present-current word), not in the control
     /// loop and not here. What a consumer wants is load, and load is what this is.
     ///
     /// **Direction is not recoverable from [`Self::velocities`].** That works while a joint is
