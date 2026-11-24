@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install the `duckctl` a branch last built, on Linux or macOS, with no Rust toolchain.
 #
-#   curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install-duckctl.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Shunjun/microduck/main/scripts/install-duckctl.sh | sh
 #   curl -fsSL .../install-duckctl.sh | sh -s -- udp-pad
 #
 # The binary comes from the `daemon-dev-<branch>` prerelease that `.github/workflows/dev.yml`
@@ -9,7 +9,7 @@
 # `~/.local/bin`, which needs no sudo.
 set -eu
 
-REPO=pollen-robotics/microduck
+REPO="${DUCK_REPO:-Shunjun/microduck}"
 branch="${1:-main}"
 dir="${DUCKCTL_DIR:-$HOME/.local/bin}"
 

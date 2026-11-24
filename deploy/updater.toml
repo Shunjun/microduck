@@ -109,7 +109,7 @@ required_files = [
 # a candidate build.
 [component.daemon.source]
 type           = "github_releases"
-repo           = "ORG/duck-daemon"
+repo           = "Shunjun/microduck"
 tag_prefix     = "daemon-v"
 manifest_asset = "manifest.json"
 # Tag prefix for per-branch dev builds, so `--ref my-branch` resolves to

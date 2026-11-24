@@ -71,7 +71,7 @@ ENV_BOARD="${DUCK_BOARD:-}"
 ENV_GSTREAMER="${DUCK_GSTREAMER:-}"
 ENV_RKAIQ="${DUCK_RKAIQ:-}"
 
-REPO="${ENV_REPO:-pollen-robotics/microduck}"
+REPO="${ENV_REPO:-Shunjun/microduck}"
 REF="${ENV_REF:-main}"
 RAW="https://raw.githubusercontent.com/${REPO}/${REF}/scripts"
 

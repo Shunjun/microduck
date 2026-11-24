@@ -2,7 +2,7 @@
 #
 # Install the robot daemon on a fresh board, from nothing.
 #
-#   curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/Shunjun/microduck/main/scripts/install.sh | sudo sh
 #
 # Target: 64-bit Debian userland on aarch64 — Armbian 26.2.x on the Radxa Zero 3, and
 # whatever else Debian 12/13 arm64 you point it at. Needs `curl` and coreutils and
@@ -49,7 +49,7 @@ set -eu
 # ── knobs ────────────────────────────────────────────────────────────────────
 
 # The repository releases are published from. Override for a fork or a test repo.
-REPO="${DUCK_REPO:-pollen-robotics/microduck}"
+REPO="${DUCK_REPO:-Shunjun/microduck}"
 
 # Branch the trusted keys are read from. Pin to a tag for a reproducible provisioning run.
 #
@@ -291,7 +291,8 @@ install_config() {
         warn "keeping the existing ${CONFIG_DIR}/updater.toml"
     else
         fetch "${config_raw}/deploy/updater.toml" "${CONFIG_DIR}/updater.toml"
-        sed -i "s|\"ORG/duck-daemon\"|\"${REPO}\"|" "${CONFIG_DIR}/updater.toml"
+        # //Compatible: support older placeholder templates and this fork's concrete default.
+        sed -i "/^\[component\.daemon\.source\]/,/^\[/s|^repo[[:space:]]*=.*|repo           = \"${REPO}\"|" "${CONFIG_DIR}/updater.toml"
         chmod 644 "${CONFIG_DIR}/updater.toml"
     fi
 
