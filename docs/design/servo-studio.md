@@ -1,6 +1,6 @@
 # Servo Studio
 
-`studio` 是独立 Rust/Axum 网页包。现有 mediad 控制台不受替换；新增调试功能的设备操作统一由 robotd 负责。使用步骤、默认端口和启动命令唯一维护于 [studio/README.md](../../studio/README.md)。
+`studio` 是独立 Rust/Axum 网页包。默认发布包使用 Studio 替代 mediad 网页服务，新增调试功能的设备操作统一由 robotd 负责。mediad 程序与可选服务文件保留。使用步骤、默认端口和启动命令唯一维护于 [studio/README.md](../../studio/README.md)。
 
 ## 文件边界
 
@@ -27,3 +27,9 @@ status 即时读取最近快照，其余命令进入容量 8 的队列。控制�
 身体 IMU 的原始样本有单独的新鲜度、计数器、静止窗口和错误，不阻止舵机调试。水平校正使用已确认的安装方向与静态重力计算最小旋转；只修正倾斜，无法从静止重力推断安装前向。它不是头部 IMU 标定。头部 IMU 的读取者由板型决定，保持现有 head_imu.stream 契约。
 
 本实现未在真实机械上验收保持参数和柔顺效果，也未部署至开发板。
+
+## 默认网页服务
+
+正式发布、开发发布、本地 dev-push 三条路径均打包 `bin/studio`、`systemd/studio.service` 和 `systemd/sysusers.d/studio.conf`。服务默认监听 8080，由安装钩子和安装脚本启用，更新器从随包服务文件自动推导重启列表。Studio 没有独立硬件权限，也不自动进入舵机调试模式。
+
+mediad 的 unit 改放在 `optional-systemd/`，避免自动启用或在每次升级时重新启动。安装钩子在启动 Studio 前停用旧机器已有的 mediad。音视频、WebRTC 和旧网页仍在 mediad 中，未迁移到 Studio。该变更只调整仓库发布配置，不自动操作已连接的开发板。

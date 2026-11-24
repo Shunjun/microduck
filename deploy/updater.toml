@@ -91,7 +91,7 @@ keep_previous = 1
 # xtask's packaging tests keep this list aligned with every release recipe.
 required_files = [
     "bin/updaterd", "bin/robotctl", "bin/robotd", "bin/configd", "bin/btd", "bin/duck-gateway",
-    "bin/padd", "bin/netpadd", "bin/mediad", "bin/sounds", "bin/pet-detect", "bin/pet-features",
+    "bin/padd", "bin/netpadd", "bin/mediad", "bin/studio", "bin/sounds", "bin/pet-detect", "bin/pet-features",
     "bin/tofd", "bin/nfcd", "bin/mapd", "bin/autod",
 ]
 
@@ -132,8 +132,8 @@ manifest_asset = "manifest.json"
 # `updaterd` restarts neither itself nor `btd`, both of which ship in this same artifact:
 # restarting itself would kill the executor mid-update, and restarting `btd` would drop
 # the connection reporting progress to the app. Both pick up the new binary at the next
-# boot. `mediad` needs no entry: the restart set is derived from the units the release ships,
-# and `mediad.service` has an `[Install]` section, so an apply restarts it like the rest.
+# boot. Studio needs no explicit entry: the restart set is derived from the shipped
+# systemd/studio.service. The optional media unit is outside that directory.
 [component.daemon.on_apply]
 action = "restart"
 # The daemons whose binaries an update replaces and which are safe to interrupt while it runs.

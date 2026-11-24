@@ -2,7 +2,7 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(about = "Microduck Servo Studio — all device access goes through robotd")]
 struct Args {
-    #[arg(long, default_value = "0.0.0.0:8081")]
+    #[arg(long, default_value = "0.0.0.0:8080")]
     listen: std::net::SocketAddr,
     #[arg(long, default_value = "/run/robotd.sock")]
     robot_socket: std::path::PathBuf,

@@ -1,6 +1,6 @@
 # Microduck Servo Studio
 
-运行在主控板上的 Rust 网页包。浏览器负责界面和本地 3D 渲染，所有设备操作经 `robot.servoDebug` 交给 robotd 的控制线程。默认访问 `http://主控IP:8081/`。
+运行在主控板上的 Rust 网页包。浏览器负责界面和本地 3D 渲染，所有设备操作经 `robot.servoDebug` 交给 robotd 的控制线程。默认访问 `http://主控IP:8080/`。
 
 ## 第一版功能
 
@@ -21,7 +21,7 @@ cargo build -p studio -p robotd
 已经完成标定并正常运行的新 robotd：启动网页服务后从页面“进入调试”即可。
 
 ```sh
-studio --robot-socket /run/robotd.sock --listen 0.0.0.0:8081
+studio --robot-socket /run/robotd.sock --listen 0.0.0.0:8080
 ```
 
 首次装机、没有完整标定或没有 IMU 时，使用 robotd 的独立调试启动方式。它仍独占串口，并暂停普通控制；不需要另开串口服务。若已有 robotd 服务在运行，先由操作员停止旧实例，再启动此实例；文件锁会拒绝同时运行。
@@ -50,7 +50,18 @@ robotd --servo-debug --no-policy --port /dev/ttyS0 \
 
 没有完整配置时可以保存标定草稿，但不会编造速度/电流单位或 IMU 安装方向。草稿不等于运动配置已就绪，正常 robotd 启动仍执行完整校验。不会改舵机 EEPROM 中位；P 写入仍沿用舵机自己的持久化设置，不改地址 55。
 
-网页包没有串口权限需求；robotd 需要串口权限和标定目录写权限。部署示例见 `deploy/studio.service`，本次实现没有自动安装服务或部署实机。
+网页包没有串口权限需求；robotd 需要串口权限和标定目录写权限。正式/开发发布包均包含 Studio 程序、`studio.service` 和专用系统用户；安装、升级后自动启动并开机自启，默认访问 `http://主控IP:8080/`。服务以 `studio` 用户、`robot` 组运行，不需要 `orangepi` 账户。程序位于 `/opt/robot/daemon/current/bin/studio`。
+
+Studio 替代默认网页入口。首次升级会停止并禁用旧 `mediad.service`。音视频程序保留，原服务文件改放在发布包的 `optional-systemd/mediad.service`，不自动安装、启动或纳入更新重启列表。需要音视频时可手动安装这个 unit 并调整端口；它的原页面仍使用 8080，须通过 `--web-port` 指定其他端口，避免与 Studio 冲突。升级默认仍会停用 mediad。
+
+查看服务状态：
+
+```sh
+systemctl status studio --no-pager
+journalctl -u studio -b
+```
+
+仓库里的服务和打包配置已接入，修改源码不会自动部署到设备；需要构建并安装新的发布包。
 
 ## 隔离模拟调试
 

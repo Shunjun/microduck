@@ -347,9 +347,9 @@ cp "$BIN"/padd staged/
 # netpadd is padd fed by UDP; an ExecCondition on `[netpad] enabled` picks which of the two runs.
 cp "$BIN"/netpadd staged/
 cp "$BIN"/autod staged/
-# The WebRTC gateway. Its unit ships with an `[Install]` section, so postinstall enables and starts
-# it and `on_apply` restarts it, exactly as for every other daemon here.
+# Studio is the default web service; media ships with a manually installable optional unit.
 cp "$BIN"/mediad staged/
+cp "$BIN"/studio staged/
 # The voice generator (postinstall renders the per-robot bank with it) and the
 # mic classifier pair — pet-detect for live listening, pet-features for training.
 cp "$BIN"/sounds staged/
@@ -403,7 +403,9 @@ cargo run -p xtask -- package \
     --include "netpadd/systemd/sysusers.d/netpadd.conf=systemd/sysusers.d/netpadd.conf" \
     --include "autod/systemd/autod.service=systemd/autod.service" \
     --include "autod/systemd/sysusers.d/autod.conf=systemd/sysusers.d/autod.conf" \
-    --include "mediad/systemd/mediad.service=systemd/mediad.service" \
+    --include "studio/deploy/studio.service=systemd/studio.service" \
+    --include "studio/deploy/sysusers.d/studio.conf=systemd/sysusers.d/studio.conf" \
+    --include "mediad/systemd/mediad.service=optional-systemd/mediad.service" \
     --include "mediad/systemd/sysusers.d/mediad.conf=systemd/sysusers.d/mediad.conf" \
     --include "tof/systemd/tofd.service=systemd/tofd.service" \
     --include "tof/systemd/sysusers.d/tofd.conf=systemd/sysusers.d/tofd.conf" \
@@ -480,7 +482,7 @@ fi
 # The apply reporting success means the swap happened and the health gate passed. It does not mean
 # the seven daemons are running the release that was swapped in, and the gap between those two is
 # where an afternoon goes: four wifi fixes were once verified as broken against a `configd` that
-# had never restarted. `robotd`, `configd`, `padd`, `mediad` and `tofd` restart during the update;
+# had never restarted. `robotd`, `configd`, `padd`, `studio` and `tofd` restart during the update;
 # `updaterd` and `btd` restart five seconds after it replies, because the first cannot restart
 # itself mid-update and the second may be carrying the reply (docs/design/restart-order.md).
 #
@@ -518,8 +520,7 @@ echo "    current -> $want"
 # no socket at all, so for that one it is the only answer available.
 deadline=$(($(date +%s) + 30))
 stale=""
-for svc in robotd configd padd updaterd btd mediad tofd nfcd mapd; do
-for svc in robotd configd padd autod updaterd btd mediad tofd; do
+for svc in robotd configd padd autod updaterd btd tofd nfcd mapd; do
     while :; do
         if [ ! -f "/run/${svc}/identity.json" ]; then
             state="silent"
@@ -544,11 +545,8 @@ for svc in robotd configd padd autod updaterd btd mediad tofd; do
         ok) echo "    [ok] $svc" ;;
         silent)
             # Not treated as a failure: systemd removes the runtime directory when a unit stops, so
-            # this is what a deliberately disabled `padd` looks like, and what `mediad` looks like on
-            # a board with no camera. `tofd` runs whether or not a sensor is fitted, so silent there
-            # is a release from before it published an identity at all — one push fixes it. The GStreamer stack is not a cause any more — the preinstall
-            # hook this push just ran installs it — so a silent `mediad` here is worth
-            # `journalctl -u mediad -b` rather than a command to type.
+            # this is what a deliberately disabled padd looks like. Studio is checked by
+            # systemd below because it does not publish a daemon identity file.
             echo "    [--] $svc published nothing — stopped, or a build too old to say"
             ;;
         stale)
@@ -567,6 +565,11 @@ done
     echo "    sudo systemctl restart <unit>       # and then why it needed doing by hand"
     exit 1
 }
+
+if ! systemctl is-active --quiet studio.service; then
+    echo "    [FAIL] studio is not active; check journalctl -u studio -b"
+    exit 1
+fi
 
 # Answerable, not healthy. A bench board with no servo power reports degraded and that is a fact
 # about the bench, not about this build — the health gate draws the same distinction.

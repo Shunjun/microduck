@@ -789,21 +789,10 @@ install_units() {
   The robot works without it — only the gamepad is unavailable."
     fi
 
-    # mediad last of the daemons, since it forwards calls to three of the ones above and its unit
-    # says `After=` them. It is safe to have running with nobody connected — `webrtcsink` listens
-    # and the pipeline sits at PLAYING.
-    #
-    # Allowed to fail like btd and padd, and for a sharper reason than either: it streams the
-    # camera by default (`[media] camera` in robotd.toml) and it needs the GStreamer stack
-    # `setup-gstreamer.sh` installs. A board missing either has no WebRTC gateway and is still a
-    # robot that updates, walks and pairs.
-    if [ -f "${UNIT_DIR}/mediad.service" ]; then
-        enable_unit mediad.service || warn "mediad did not start; check:
-    journalctl -u mediad -b
-  A board with no camera, or provisioned before the GStreamer stack existed, is the usual cause:
-    sudo /usr/local/sbin/robot-setup-gstreamer          # the stack
-    sudo robotctl configure                             # [media] camera off, for no camera
-  The robot works without it — only the camera and the WebRTC console are unavailable."
+    # Studio is the default web entry point. Device access remains in robotd.
+    if [ -f "${unit_src}/studio.service" ]; then
+        enable_unit studio.service || warn "studio did not start; check:
+    journalctl -u studio -b"
     fi
 
     # The boot-time recovery net: three minutes into each boot, ask whether this release brought
@@ -830,7 +819,7 @@ install_units() {
             updaterd.service|robotd.service|configd.service|btd.service|padd.service) ;;
             # Enabled by postinstall beside padd; its ExecCondition decides which of the two runs.
             netpadd.service) ;;
-            mediad.service) ;;
+            studio.service) ;;
             duck-gateway.service) ;;
             # No `enable_unit` of its own, unlike the three above: `postinstall` enabled every
             # unit carrying an `[Install]` section a step earlier, and nothing depends on this

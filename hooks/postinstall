@@ -165,6 +165,15 @@ if ! command -v systemctl >/dev/null 2>&1; then
     exit 0
 fi
 
+# //Compatible: a pre-Studio release may have enabled mediad. Stop and disable it before
+# starting the new web entry point. Its unit remains available under optional-systemd/.
+if [ -f systemd/studio.service ] && [ ! -f systemd/mediad.service ]; then
+    if systemctl cat mediad.service >/dev/null 2>&1; then
+        systemctl disable --now mediad.service \
+            || echo "postinstall: could not stop the old mediad service; check journalctl -u mediad" >&2
+    fi
+fi
+
 systemctl daemon-reload || echo "postinstall: daemon-reload failed" >&2
 
 # Enable — and start — every unit the release ships.
