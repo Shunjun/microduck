@@ -34,6 +34,53 @@ impl<B: RegisterBus> FeetechIo<B> {
     }
 }
 impl<B: RegisterBus> RobotIo for FeetechIo<B> {
+    fn debug_imu(&mut self) -> Result<crate::servo_debug::ImuReading> {
+        super::debug::read_imu(&mut self.bus.bus)
+    }
+    fn debug_set_imu_mount(&mut self, mount: [f64; 4]) -> Result<()> {
+        self.bus.set_imu_mount(mount)?;
+        self.config.imu_mount = mount;
+        Ok(())
+    }
+
+    fn servo_debug(
+        &mut self,
+        op: &crate::servo_debug::DeviceOp,
+    ) -> Result<Vec<crate::servo_debug::JointReading>> {
+        let mut joints = self
+            .config
+            .joints
+            .each_ref()
+            .map(|j| crate::servo_debug::JointSetting {
+                id: j.id,
+                zero_ticks: Some(j.zero_ticks),
+                direction: Some(j.direction),
+                min_ticks: Some(j.min_ticks),
+                max_ticks: Some(j.max_ticks),
+            });
+        let result = super::debug::exchange(&mut self.bus.bus, &mut joints, op)?;
+        if matches!(op, crate::servo_debug::DeviceOp::Configure { .. }) {
+            let mut next = self.config.clone();
+            for (j, s) in next.joints.iter_mut().zip(joints) {
+                j.zero_ticks = s
+                    .zero_ticks
+                    .ok_or_else(|| super::fail("zero is required"))?;
+                j.direction = s
+                    .direction
+                    .ok_or_else(|| super::fail("direction is required"))?;
+                j.min_ticks = s
+                    .min_ticks
+                    .ok_or_else(|| super::fail("limits are required"))?;
+                j.max_ticks = s
+                    .max_ticks
+                    .ok_or_else(|| super::fail("limits are required"))?;
+            }
+            next.validate()?;
+            self.config = next;
+        }
+        Ok(result)
+    }
+
     fn read(&mut self) -> Result<Sensors> {
         let frame = self.bus.read()?;
         let mut sensors = Sensors {

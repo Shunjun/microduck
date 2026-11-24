@@ -865,7 +865,8 @@ impl Server {
 
             // `robot.*` belongs to `robotd`. Reaching this means a client aimed the wrong
             // socket, so name that rather than reporting a generic failure.
-            Call::RobotSafeToRestart
+            Call::RobotServoDebug(_)
+            | Call::RobotSafeToRestart
             | Call::RobotHealth
             | Call::RobotModelApi
             | Call::RobotMove(_)

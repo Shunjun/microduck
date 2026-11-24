@@ -1,0 +1,15 @@
+[Unit]
+Description=Microduck Servo Studio
+After=robotd.service
+
+[Service]
+Type=simple
+# Adjust to the account/group used by the installed robotd socket.
+User=orangepi
+SupplementaryGroups=robot
+ExecStart=/usr/local/bin/studio --listen 0.0.0.0:8081 --robot-socket /run/robotd.sock
+Restart=on-failure
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

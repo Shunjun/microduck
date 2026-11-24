@@ -181,6 +181,21 @@ impl<T: RobotIo> Safety<T> {
         }
     }
 
+    /// Only robotd's exclusive debug branch uses this, with the normal loop suspended.
+    pub fn debug_imu(&mut self) -> Result<crate::servo_debug::ImuReading, IoError> {
+        self.io.debug_imu()
+    }
+    pub fn debug_set_imu_mount(&mut self, mount: [f64; 4]) -> Result<(), IoError> {
+        self.io.debug_set_imu_mount(mount)
+    }
+    pub fn servo_debug(
+        &mut self,
+        op: &crate::servo_debug::DeviceOp,
+    ) -> Result<Vec<crate::servo_debug::JointReading>, IoError> {
+        self.gain = None;
+        self.io.servo_debug(op)
+    }
+
     pub fn read(&mut self) -> Result<Sensors, IoError> {
         self.io.read()
     }

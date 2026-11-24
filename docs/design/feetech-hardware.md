@@ -143,3 +143,12 @@ cargo clippy -p duck-control --all-targets -- -D warnings
 测试覆盖混合总线排序、版本拒绝、读错后清除就绪状态、采样计数回绕、重复采样预热、冻结超时、
 实际串口包的校验和/回包 ID/设备错误、非法 fp16、诊断版本、符号幅值/关节单位转换、整批拒绝非法目标和写入地址。
 不连接真实串口，不代表已通过 Orange Pi/HD1910 的电气或运动测试。
+
+
+## 头部 IMU 与香橙派排针（2026-11-23 只读检查）
+
+头部 IMU 与本后端的身体 IMU ID200 是两条链路。原 HAT 的头部 I²C 使用物理 3（SDA）/5（SCL）；香橙派 Zero 3W A733 对应 PB3/TWI0-SDA、PB2/TWI0-SCK，需要 I²C0，而非原 Radxa 上的 Linux I²C3。来源为 Pollen HAT main/sensors 原理图和用户提供的 A733 手册（印刷 98 页，PDF 105 页）。
+
+在 192.168.11.170 实机只读检查时，这两个引脚均为 OFF，没有 /dev/i2c-0，orangepiEnv.txt 没有 overlays 项；系统具备 /boot/dtb-6.6.98-sun60iw2/allwinner/overlay/sun60i-a733-i2c0.dtbo。未修改启动配置、未重启、未读取到该总线上的芯片 ID。现有其他 I²C 节点属于别的控制器，不可据此认为排针总线已启用。
+
+HAT 有不同硬件修订，头部芯片不能只凭“原版 HAT”认定为 BMI088；开启对应总线后，应只读芯片身份确定使用 BMI088 或相应 LSM 系列驱动。当前 tofd 的 Zero3 路径预期 BMI088，头部数据流默认关闭。通过显式 bus 配置选择正确总线，不应为改一个总线而冒用另一整机板型。

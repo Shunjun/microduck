@@ -62,6 +62,7 @@ pub fn load_feetech_config(path: &Path) -> Result<FeetechConfig> {
 pub enum BusIo {
     Xl330(Box<DynamixelIo>),
     Feetech1910(Box<FeetechIo>),
+    Commissioning(Box<duck_control::feetech1910::debug::CommissioningIo>),
 }
 
 impl BusIo {
@@ -75,7 +76,7 @@ impl BusIo {
         match self {
             Self::Xl330(io) => io.imu_answers(),
             // FeetechIo::open already read and validated the IMU's model/firmware identity.
-            Self::Feetech1910(_) => Ok(true),
+            Self::Feetech1910(_) | Self::Commissioning(_) => Ok(true),
         }
     }
 
@@ -87,6 +88,9 @@ impl BusIo {
     ) -> Result<()> {
         match self {
             Self::Xl330(io) => io.interpolate_to(target, duration, step),
+            Self::Commissioning(_) => Err(IoError::Bus(
+                "restart robotd normally after calibration".into(),
+            )),
             Self::Feetech1910(io) => {
                 if step.is_zero() {
                     return Err(IoError::Bus("interpolation step must be nonzero".into()));
@@ -112,11 +116,26 @@ macro_rules! dispatch {
         match $this {
             BusIo::Xl330(io) => io.$method($($arg),*),
             BusIo::Feetech1910(io) => io.$method($($arg),*),
+            BusIo::Commissioning(io) => io.$method($($arg),*),
         }
     };
 }
 
 impl RobotIo for BusIo {
+    fn debug_imu(&mut self) -> Result<duck_control::servo_debug::ImuReading> {
+        dispatch!(self, debug_imu)
+    }
+    fn debug_set_imu_mount(&mut self, mount: [f64; 4]) -> Result<()> {
+        dispatch!(self, debug_set_imu_mount, mount)
+    }
+
+    fn servo_debug(
+        &mut self,
+        op: &duck_control::servo_debug::DeviceOp,
+    ) -> Result<Vec<duck_control::servo_debug::JointReading>> {
+        dispatch!(self, servo_debug, op)
+    }
+
     fn read(&mut self) -> Result<Sensors> {
         dispatch!(self, read)
     }
@@ -130,6 +149,7 @@ impl RobotIo for BusIo {
         match self {
             Self::Xl330(io) => RobotIo::set_torque(io.as_mut(), on),
             Self::Feetech1910(io) => io.set_torque(on),
+            Self::Commissioning(io) => io.set_torque(on),
         }
     }
     fn reboot(&mut self, id: u8) -> Result<()> {

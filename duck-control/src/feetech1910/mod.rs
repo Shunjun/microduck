@@ -2,6 +2,7 @@
 //Compatible: independent Feetech backend; opening it performs read-only checks.
 pub mod bus;
 pub mod config;
+pub mod debug;
 mod driver;
 pub mod feedback;
 pub mod imu;

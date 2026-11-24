@@ -5412,6 +5412,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "studio"
+version = "0.23.0"
+dependencies = [
+ "axum",
+ "clap",
+ "duck-ipc-proto",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -5,11 +5,11 @@ use super::{
     imu::{IMU_ID, ImuV1},
 };
 use crate::{io::Result, model::NUM_JOINTS};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// Joint order must be exactly crate::JOINT_NAMES; IDs may differ from the original robot.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct JointCalibration {
     pub id: u8,
@@ -52,7 +52,7 @@ impl JointCalibration {
         Ok(ticks.round() as u16)
     }
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub joints: [JointCalibration; NUM_JOINTS],

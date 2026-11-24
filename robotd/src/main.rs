@@ -31,6 +31,7 @@ mod leds;
 mod params;
 mod pickup;
 mod posture;
+mod servo_debug;
 mod soc;
 mod soccer;
 mod sound;
@@ -70,7 +71,6 @@ const MODEL_API: u32 = 2;
 
 //Compatible: change only this constant to select the motor protocol, then rebuild.
 const MOTOR_DRIVER: hardware::MotorDriver = hardware::MotorDriver::Feetech1910;
-#[cfg(target_os = "linux")]
 /// Feetech encoder/mount/unit calibration; IDs retain the original joint order.
 const FEETECH_CALIBRATION_PATH: &str = "/etc/robot/feetech1910.json";
 
@@ -404,6 +404,13 @@ struct Args {
     /// nothing falls over when a deliberately broken release lands.
     #[arg(long)]
     no_policy: bool,
+
+    /// Commissioning backend: no policy or IMU required; all operations go through robotd.
+    #[arg(long, conflicts_with = "sim")]
+    servo_debug: bool,
+    /// Software encoder calibration, also used by Servo Studio.
+    #[arg(long, default_value = FEETECH_CALIBRATION_PATH)]
+    servo_calibration: PathBuf,
 
     /// Report unhealthy. For exercising the updater's rollback path on a bench robot
     /// without having to break a real build.
@@ -742,6 +749,7 @@ fn drop_unloadable_overrides_with(
 }
 
 struct RobotState {
+    servo_debug: servo_debug::Hub,
     /// Epoch for every timestamp below. `Instant` so the clock cannot go backwards.
     started: Instant,
     ticks: AtomicU64,
@@ -949,6 +957,11 @@ impl RobotState {
         force_busy: bool,
     ) -> Self {
         Self {
+            servo_debug: servo_debug::Hub::new(
+                PathBuf::from(FEETECH_CALIBRATION_PATH),
+                false,
+                false,
+            ),
             started: Instant::now(),
             ticks: AtomicU64::new(0),
             missed: AtomicU64::new(0),
@@ -1055,6 +1068,9 @@ impl RobotState {
         let unhealthy = |reason: String| describe(false, false, Some(reason));
         // Not healthy, but not the release's fault either — see `HealthResult::degraded`.
         let degraded = |reason: String| describe(false, true, Some(reason));
+        if self.servo_debug.active.load(Ordering::Relaxed) {
+            return degraded("servo debug mode owns control; normal policy is paused".into());
+        }
 
         if self.force_unhealthy {
             return unhealthy("forced unhealthy by --unhealthy".into());
@@ -1234,6 +1250,12 @@ impl RobotState {
     }
 
     fn safe_to_restart(&self) -> proto::SafeToRestartResult {
+        if self.servo_debug.active.load(Ordering::Relaxed) {
+            return proto::SafeToRestartResult {
+                safe: false,
+                reason: Some("servo debug session is active".into()),
+            };
+        }
         if self.force_busy {
             return proto::SafeToRestartResult {
                 safe: false,
@@ -1310,15 +1332,15 @@ async fn main() -> ExitCode {
     if let Some(port) = args.port.clone() {
         params.bus.port = port;
     }
-    if args.no_policy {
+    if args.no_policy || args.servo_debug {
         params.policy.enabled = false;
     }
 
     #[cfg(target_os = "linux")]
     if MOTOR_DRIVER == hardware::MotorDriver::Feetech1910
+        && !args.servo_debug
         && ((!args.fake && args.sim.is_none()) || args.command.is_some())
-        && let Err(error) =
-            hardware::load_feetech_config(std::path::Path::new(FEETECH_CALIBRATION_PATH))
+        && let Err(error) = hardware::load_feetech_config(&args.servo_calibration)
     {
         tracing::error!(%error, "invalid Feetech calibration; no motor port was opened");
         return ExitCode::FAILURE;
@@ -1335,7 +1357,7 @@ async fn main() -> ExitCode {
             }
         };
         duck_ipc_proto::log_startup_identity!("robotd");
-        return run_init(&params, duration);
+        return run_init(&params, duration, &args.servo_calibration);
     }
 
     // Own the endpoint before publishing an identity or starting a thread that can touch
@@ -1350,6 +1372,8 @@ async fn main() -> ExitCode {
     duck_ipc_proto::log_startup_identity!("robotd");
 
     let mut state = RobotState::new(&params, &params_path, args.unhealthy, args.busy);
+    state.servo_debug =
+        servo_debug::Hub::new(args.servo_calibration.clone(), args.fake, args.servo_debug);
     let vetbook_path = args.vetbook.clone().or_else(|| {
         (!args.fake && args.sim.is_none()).then(|| PathBuf::from(vetbook::DEFAULT_PATH))
     });
@@ -1442,7 +1466,7 @@ async fn main() -> ExitCode {
 
 /// Enable torque and ramp to the home pose.
 #[cfg(target_os = "linux")]
-fn run_init(params: &Params, duration: Duration) -> ExitCode {
+fn run_init(params: &Params, duration: Duration, calibration: &Path) -> ExitCode {
     // The same open as the daemon's, replacement adoption included: `init` is what someone
     // reaches for right after a motor swap, and it must not be the one path that refuses the
     // new servo.
@@ -1453,6 +1477,7 @@ fn run_init(params: &Params, duration: Duration) -> ExitCode {
         0,
         &mut Vec::new(),
         &mut adopted,
+        calibration,
     );
     // The daemon is stopped while `init` runs — it holds the same lock — so the book is this
     // process's to write.
@@ -1488,7 +1513,7 @@ fn run_init(params: &Params, duration: Duration) -> ExitCode {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn run_init(_params: &Params, _duration: Duration) -> ExitCode {
+fn run_init(_params: &Params, _duration: Duration, _calibration: &Path) -> ExitCode {
     tracing::error!("init needs a real bus; this build is not on the robot");
     ExitCode::FAILURE
 }
@@ -1703,6 +1728,17 @@ fn take_census<T: RobotIo>(safety: &mut duck_control::safety::Safety<T>, state: 
 /// Returns `None` only if shutdown is requested while waiting.
 async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo> {
     let mut attempt = 0u32;
+    #[cfg(target_os = "linux")]
+    if state.servo_debug.bootstrap {
+        while !state.shutdown.load(Ordering::Relaxed) {
+            match duck_control::feetech1910::debug::CommissioningIo::open(&bus.port) {
+                Ok(io) => return Some(BusIo::Commissioning(Box::new(io))),
+                Err(e) => tracing::warn!(error=%e, "waiting for commissioning serial port"),
+            }
+            tokio::time::sleep(STARTUP_RETRY_INTERVAL).await;
+        }
+        return None;
+    }
 
     while !state.shutdown.load(Ordering::Relaxed) {
         // Logging lives in `open_bus`, which is chatty by design on the first attempt and
@@ -1710,7 +1746,14 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
         let mut missing = Vec::new();
         let mut imu_missing = false;
         let mut adopted = None;
-        let opened = open_bus(bus, state.board, attempt, &mut missing, &mut adopted);
+        let opened = open_bus(
+            bus,
+            state.board,
+            attempt,
+            &mut missing,
+            &mut adopted,
+            &state.servo_debug.path,
+        );
         // Written down whether or not the rest of the bring-up works: the servo is in the joint
         // now, flashed to its ID, and the next attempt will not see it as new.
         if let Some(id) = adopted {
@@ -1781,13 +1824,14 @@ fn open_bus(
     attempt: u32,
     missing: &mut Vec<u8>,
     adopted: &mut Option<u8>,
+    calibration: &Path,
 ) -> Option<BusIo> {
     // First attempt and every thirtieth — about one line per 30 s while waiting.
     let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
     let port = bus.port.as_str();
 
     if MOTOR_DRIVER == hardware::MotorDriver::Feetech1910 {
-        return match BusIo::open_feetech(port, std::path::Path::new(FEETECH_CALIBRATION_PATH)) {
+        return match BusIo::open_feetech(port, calibration) {
             Ok(io) => {
                 if loud {
                     tracing::info!(port, "Feetech backend opened");
@@ -1966,6 +2010,7 @@ fn open_bus(
     _attempt: u32,
     _missing: &mut Vec<u8>,
     _adopted: &mut Option<u8>,
+    _calibration: &Path,
 ) -> Option<BusIo> {
     tracing::error!("no bus on this platform; use --fake");
     None
@@ -2814,10 +2859,65 @@ async fn control_loop<T: RobotIo>(
     // `robot.state` timestamp by one inference otherwise. It rides the coast: a coasted tick
     // republishes the last fresh sample, so it must republish that sample's read time too.
     let mut sensors_read_ns = 0u64;
+    let mut debug_controller = servo_debug::Controller::new(&state.servo_debug);
     while !state.shutdown.load(Ordering::Relaxed) {
         ticker.tick().await;
         let tick_start = Instant::now();
 
+        let was_debug = state.servo_debug.active.load(Ordering::Relaxed);
+        if debug_controller.tick(
+            &state.servo_debug,
+            &mut safety,
+            !powered_off && shutdown_sit.is_none() && shutdown_rest.is_none(),
+        ) {
+            intents.set_enabled(false);
+            intents.stop();
+            intents.set_head([0.; 4]);
+            intents.set_pose(intents::PoseIntent::default());
+            intents.set_mouth(0.);
+            intents.set_autonomous(false);
+            intents.set_soccer(false, false);
+            laser.set_active(false);
+            soccer.set_autonomous(false);
+            playing = None;
+            if let Some(instrument) = theremin.as_mut() {
+                instrument.set_active(false);
+            }
+            let _ = intents.take_theremin_request();
+            let _ = intents.take_laser_request();
+            let _ = intents.take_power_request();
+            let _ = intents.take_reboot_motors();
+            let _ = intents.take_rest();
+            let _ = intents.take_shutdown();
+            let _ = intents.take_mode_switch();
+            let _ = intents.take_skills();
+            let _ = intents.take_policy_change();
+            let _ = intents.take_emotion();
+            mode_change = None;
+            pending_swap = None;
+            twist_ema = [0.; 3];
+            head_ema = [0.; 4];
+            body_ema = [0.; 3];
+            state.moving.store(false, Ordering::Relaxed);
+            state.homed.store(false, Ordering::Relaxed);
+            bringup = Bringup::Limp;
+            was_driving = false;
+            limp_fall = LimpFall::Idle;
+            if let Some(c) = controller.as_mut() {
+                c.stop_moves();
+                c.reset();
+            }
+            continue;
+        }
+        if was_debug {
+            intents.set_enabled(false);
+            intents.stop();
+            let _ = intents.take_power_request();
+            continue;
+        }
+        if state.servo_debug.bootstrap {
+            continue;
+        }
         let read_at = proto::clock::monotonic_ns();
         let fresh = match safety.read() {
             Ok(sensors) => {
@@ -5288,6 +5388,73 @@ async fn handle(
             }
         };
 
+        if request.method == proto::method::ROBOT_SERVO_DEBUG {
+            if let Some(id) = request.id.clone() {
+                let reply = match serde_json::from_value::<servo_debug::Request>(
+                    request.params.clone().unwrap_or_default(),
+                ) {
+                    Ok(command) => match state.servo_debug.request(command).await {
+                        Ok(status) => proto::Response::ok(Some(id), &status),
+                        Err(e) => proto::Response::err(
+                            Some(id),
+                            proto::Error::new(proto::code::INVALID_PARAMS, e),
+                        ),
+                    },
+                    Err(e) => proto::Response::err(
+                        Some(id),
+                        proto::Error::new(proto::code::INVALID_PARAMS, e.to_string()),
+                    ),
+                };
+                write_line(&mut write_half, &reply).await?;
+            }
+            continue;
+        }
+        if state.servo_debug.active.load(Ordering::Relaxed) && request.method.starts_with("robot.")
+        {
+            let allowed = [
+                "robot.health",
+                "robot.policies",
+                "robot.mode",
+                "robot.model",
+                "robot.safeToRestart",
+                "robot.subscribe",
+                "robot.modelApi",
+            ];
+            if !allowed.contains(&request.method.as_str()) {
+                if request.method == "robot.relax" || request.method == "robot.stop" {
+                    let reply = state
+                        .servo_debug
+                        .request(servo_debug::Request::Torque {
+                            id: None,
+                            on: false,
+                        })
+                        .await;
+                    if let Some(id) = request.id.clone() {
+                        let response = match reply {
+                            Ok(s) => proto::Response::ok(Some(id), &s),
+                            Err(e) => proto::Response::err(
+                                Some(id),
+                                proto::Error::new(proto::code::INVALID_PARAMS, e),
+                            ),
+                        };
+                        write_line(&mut write_half, &response).await?;
+                    }
+                } else if let Some(id) = request.id.clone() {
+                    write_line(
+                        &mut write_half,
+                        &proto::Response::err(
+                            Some(id),
+                            proto::Error::new(
+                                proto::code::INVALID_PARAMS,
+                                "servo debug owns control",
+                            ),
+                        ),
+                    )
+                    .await?;
+                }
+                continue;
+            }
+        }
         let call = request.as_call();
 
         if let Ok(proto::Call::Hello(hello)) = &call {
@@ -5354,6 +5521,9 @@ async fn handle(
 /// client that sends `robot.move` with an `id` is not silently ignored — the spec permits
 /// either, and refusing one because of a framing choice would be a surprise.
 fn apply_intent(state: &RobotState, intents: &Intents, call: &proto::Call) -> bool {
+    if state.servo_debug.active.load(Ordering::Relaxed) {
+        return false;
+    }
     match call {
         proto::Call::RobotMove(p) => {
             intents.set_twist([p.vx, p.vy, p.vyaw]);
@@ -6024,6 +6194,14 @@ fn dispatch(
     call: &proto::Call,
 ) -> proto::Response {
     match call {
+        proto::Call::RobotServoDebug(_) => proto::Response::err(
+            Some(id),
+            proto::Error::new(
+                proto::code::INVALID_PARAMS,
+                "use the asynchronous debug endpoint",
+            ),
+        ),
+
         proto::Call::RobotMove(_)
         | proto::Call::RobotHead(_)
         | proto::Call::RobotPose(_)

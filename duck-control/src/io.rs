@@ -113,6 +113,23 @@ pub struct ImuStale {
 }
 
 pub trait RobotIo {
+    fn debug_imu(&mut self) -> Result<crate::servo_debug::ImuReading> {
+        Err(IoError::Bus("body IMU debug unsupported".into()))
+    }
+    fn debug_set_imu_mount(&mut self, _mount: [f64; 4]) -> Result<()> {
+        Err(IoError::Bus("body IMU mounting unsupported".into()))
+    }
+
+    /// Raw commissioning access; the owner must suspend policy/safety writes first.
+    fn servo_debug(
+        &mut self,
+        _op: &crate::servo_debug::DeviceOp,
+    ) -> Result<Vec<crate::servo_debug::JointReading>> {
+        Err(IoError::Bus(
+            "servo debugging is unsupported by this backend".into(),
+        ))
+    }
+
     /// One transaction: joints and IMU together.
     fn read(&mut self) -> Result<Sensors>;
     fn write(&mut self, targets: &JointTargets) -> Result<()>;
@@ -266,6 +283,7 @@ pub struct ServoIdentity {
 /// needs no hardware, no network and no Docker. Positions echo back whatever was last
 /// written, so a loop driving it behaves like a servo that tracks perfectly.
 pub struct FakeIo {
+    pub debug_device: crate::servo_debug::SimDevice,
     sensors: Sensors,
     /// Set to make the next [`RobotIo::read`] fail, then cleared. For exercising the
     /// loop's error path without a flaky bus.
@@ -325,6 +343,7 @@ impl Default for FakeIo {
 impl FakeIo {
     pub fn new() -> Self {
         Self {
+            debug_device: crate::servo_debug::SimDevice::default(),
             sensors: Sensors::default(),
             fail_next_read: false,
             fail_reads: 0,
@@ -400,6 +419,25 @@ impl FakeIo {
 }
 
 impl RobotIo for FakeIo {
+    fn debug_imu(&mut self) -> Result<crate::servo_debug::ImuReading> {
+        self.reads += 1;
+        Ok(crate::servo_debug::ImuReading {
+            quat: [1., 0., 0., 0.],
+            gyro: [0.; 3],
+            counter: self.reads as u8,
+        })
+    }
+    fn debug_set_imu_mount(&mut self, _mount: [f64; 4]) -> Result<()> {
+        Ok(())
+    }
+
+    fn servo_debug(
+        &mut self,
+        op: &crate::servo_debug::DeviceOp,
+    ) -> Result<Vec<crate::servo_debug::JointReading>> {
+        self.debug_device.execute(op)
+    }
+
     fn read(&mut self) -> Result<Sensors> {
         if self.fail_next_read {
             self.fail_next_read = false;

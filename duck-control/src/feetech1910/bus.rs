@@ -180,6 +180,10 @@ impl<B: RegisterBus> FeetechBus<B> {
             diagnostics,
         })
     }
+    pub fn set_imu_mount(&mut self, mount: [f64; 4]) -> Result<()> {
+        self.imu = ImuV1::new(mount)?;
+        Ok(())
+    }
     pub fn imu_ready(&self) -> bool {
         self.imu.ready()
     }
