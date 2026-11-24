@@ -181,6 +181,21 @@ impl<T: RobotIo> Safety<T> {
         }
     }
 
+    /// Only robotd's exclusive debug branch uses this, with the normal loop suspended.
+    pub fn debug_imu(&mut self) -> Result<crate::servo_debug::ImuReading, IoError> {
+        self.io.debug_imu()
+    }
+    pub fn debug_set_imu_mount(&mut self, mount: [f64; 4]) -> Result<(), IoError> {
+        self.io.debug_set_imu_mount(mount)
+    }
+    pub fn servo_debug(
+        &mut self,
+        op: &crate::servo_debug::DeviceOp,
+    ) -> Result<Vec<crate::servo_debug::JointReading>, IoError> {
+        self.gain = None;
+        self.io.servo_debug(op)
+    }
+
     pub fn read(&mut self) -> Result<Sensors, IoError> {
         self.io.read()
     }
@@ -848,7 +863,7 @@ mod tests {
     /// This is the failure the run counters exist to prevent: at 50 Hz a policy emitting
     /// NaN writes a line a tick, and fifty identical lines a second is what teaches
     /// everyone to stop reading the journal — the same reason the stale-IMU warning in
-    /// `bus.rs` says nothing until a run is long enough to mean something.
+    /// `xl330/driver.rs` says nothing until a run is long enough to mean something.
     #[test]
     fn a_limit_that_keeps_firing_is_reported_periodically_not_per_tick() {
         assert!(LimitRuns::worth_logging(1), "the first trip is always news");

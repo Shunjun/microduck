@@ -2,6 +2,8 @@
 
 Status: draft · Date: 2026-08-20 · Owner: pierre
 
+Driver source organization and module dependencies: [hardware-drivers.md](hardware-drivers.md).
+
 Implements the `robotd` row of [`architecture.md`](architecture.md) §1 and covers
 [`roadmap.md`](../project/roadmap.md) M3. The prototype being absorbed is
 [`apirrone/microduck_runtime`](https://github.com/apirrone/microduck_runtime), referred to
@@ -26,7 +28,7 @@ second port:
 ```text
                      robotd — control thread
                               │
-                              │  duck_control::bus::DynamixelIo
+                              │  duck_control::xl330::DynamixelIo
                               │  serialport · TIOCEXCL
                               ▼
          /dev/ttyS2 · 1 Mbps · Dynamixel protocol v2

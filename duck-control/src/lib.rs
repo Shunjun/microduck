@@ -7,8 +7,8 @@
 //! The control path it holds — model, bus, [`io::RobotIo`], observations, policy, safety — is
 //! designed in `docs/design/robotd-design.md` §2.
 
-pub mod bus;
 pub mod fall;
+pub mod feetech1910;
 pub mod imu;
 pub mod io;
 pub mod model;
@@ -16,13 +16,19 @@ pub mod obs;
 pub mod pickup;
 pub mod policy;
 pub mod safety;
+pub mod servo_debug;
+pub mod sflp;
 /// A robot in MuJoCo, over TCP — the backend `robotd-design.md` §9 deferred.
 pub mod sim;
+pub mod xl330;
 
 pub use imu::ImuData;
 pub use io::{Census, FakeIo, IoError, JointTargets, RobotIo, Sensors, SlowSensors};
 pub use model::{
-    BATTERY_EMPTY_V, BATTERY_FULL_V, DEFAULT_POSITION, JOINT_IDS, JOINT_NAMES, NUM_JOINTS,
-    REST_POSITION, battery_percent, goal_pwm_for,
+    BATTERY_EMPTY_V, BATTERY_FULL_V, DEFAULT_POSITION, JOINT_NAMES, NUM_JOINTS, REST_POSITION,
+    battery_percent, goal_pwm_for,
 };
 pub use obs::{ACTION_LEN, Command, OBS_LEN, Observation};
+
+//Compatible: keep the existing crate-level default ID export for clients.
+pub use xl330::config::JOINT_IDS;

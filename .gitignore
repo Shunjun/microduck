@@ -2,6 +2,9 @@
 # nested one (updater/target), and `/target` would not match it.
 target/
 
+# macOS Finder metadata
+.DS_Store
+
 # ── never commit signing material ────────────────────────────────────────────
 #
 # `cargo xtask keygen` refuses to write keys inside the repo, so these patterns are

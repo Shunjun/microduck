@@ -21,7 +21,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use duck_control::model::{JOINT_IDS, NUM_JOINTS};
+use crate::hardware::JOINT_IDS;
+use duck_control::model::NUM_JOINTS;
 use duck_ipc_proto::vetbook::{
     HOT_C, Identity, Life, Vetbook, VetbookTallyParams, Wear, key, merge_maps,
 };

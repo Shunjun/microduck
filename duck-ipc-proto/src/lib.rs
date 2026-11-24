@@ -674,7 +674,7 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// display the tag's sequence ends with. No params; [`IntentResult`] once it has started, so a
 /// client watches [`method::PHOTO_LIST`] for the picture. Answered by `nfcd`; an older one answers
 /// METHOD_NOT_FOUND, by name, which is how a client tells a robot that cannot.
-pub const API_VERSION: u32 = 68;
+pub const API_VERSION: u32 = 69;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -912,6 +912,7 @@ pub mod method {
     //     needs to know whether it was accepted and why not.
 
     /// Velocity twist. Continuous; send as a notification.
+    pub const ROBOT_SERVO_DEBUG: &str = "robot.servoDebug";
     pub const ROBOT_MOVE: &str = "robot.move";
     /// Head joint targets. Continuous; send as a notification.
     pub const ROBOT_HEAD: &str = "robot.head";
@@ -1434,6 +1435,8 @@ pub enum Id {
 /// paired with another method's parameters — the drift this crate exists to prevent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Call {
+    /// Exclusive servo debugging. Parameters are validated by robotd.
+    RobotServoDebug(Value),
     /// Version handshake. The first call on a connection.
     Hello(HelloParams),
 
@@ -1690,6 +1693,7 @@ impl Call {
     /// The wire method name.
     pub fn method(&self) -> &'static str {
         match self {
+            Call::RobotServoDebug(_) => method::ROBOT_SERVO_DEBUG,
             Call::Hello(_) => method::HELLO,
             Call::Check(_) => method::CHECK,
             Call::Apply(_) => method::APPLY,
@@ -1812,6 +1816,7 @@ impl Call {
                 | Call::SystemReboot
                 | Call::SystemSetPairingPin(_)
                 // Powering the machine off is at least as disruptive as rebooting it.
+                | Call::RobotServoDebug(_)
                 | Call::RobotShutdown
                 // Bonding a pad to this robot changes what may drive it, which is the most
                 // consequential thing in this namespace — a paired pad can enable the policy.
@@ -1871,6 +1876,7 @@ impl Call {
         Some(match self {
             // The version handshake. `updaterd` answers it because it is the service on the
             // recovery path — the one that must reply when the rest of the robot does not.
+            Call::RobotServoDebug(_) => (Robot, Operation),
             Call::Hello(_) => (Updater, Prompt),
 
             // ── updaterd ────────────────────────────────────────────────────
@@ -2072,6 +2078,7 @@ impl Call {
             serde_json::to_value(params).unwrap_or(Value::Null)
         }
         match self {
+            Call::RobotServoDebug(p) => p.clone(),
             Call::Hello(p) => encode(p),
             Call::Check(p)
             | Call::Rollback(p)
@@ -2201,6 +2208,7 @@ impl Call {
             method::ROBOT_SAFE_TO_RESTART => Call::RobotSafeToRestart,
             method::ROBOT_HEALTH => Call::RobotHealth,
             method::ROBOT_MODEL_API => Call::RobotModelApi,
+            method::ROBOT_SERVO_DEBUG => Call::RobotServoDebug(decode(params)?),
             method::ROBOT_MOVE => Call::RobotMove(decode(params)?),
             method::ROBOT_HEAD => Call::RobotHead(decode(params)?),
             method::ROBOT_LOOK => Call::RobotLook(decode(params)?),
@@ -5257,7 +5265,7 @@ pub struct RobotState {
     /// Present current magnitude per joint, mA, indexed as [`JOINT_NAMES`].
     ///
     /// Magnitude, not a signed current: the sign is dropped in the bus driver
-    /// (`duck_control::bus`, the `.abs()` on the present-current word), not in the control
+    /// (`duck_control::xl330`, the `.abs()` on the present-current word), not in the control
     /// loop and not here. What a consumer wants is load, and load is what this is.
     ///
     /// **Direction is not recoverable from [`Self::velocities`].** That works while a joint is

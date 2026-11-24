@@ -19,7 +19,7 @@ pub struct Sensors {
     /// Joint velocities, rad/s.
     pub velocities: [f64; NUM_JOINTS],
     /// Present current magnitude, mA. The sign is dropped by whichever driver fills this —
-    /// [`crate::bus`] takes the absolute value as it unpacks the word — because what every
+    /// [`crate::xl330`] takes the absolute value as it unpacks the word — because what every
     /// consumer so far wants is load. It is not recoverable from `velocities`: a joint holding
     /// a squat or a foot taking weight is near-zero velocity at non-zero current.
     pub currents_ma: [f64; NUM_JOINTS],
@@ -113,6 +113,23 @@ pub struct ImuStale {
 }
 
 pub trait RobotIo {
+    fn debug_imu(&mut self) -> Result<crate::servo_debug::ImuReading> {
+        Err(IoError::Bus("body IMU debug unsupported".into()))
+    }
+    fn debug_set_imu_mount(&mut self, _mount: [f64; 4]) -> Result<()> {
+        Err(IoError::Bus("body IMU mounting unsupported".into()))
+    }
+
+    /// Raw commissioning access; the owner must suspend policy/safety writes first.
+    fn servo_debug(
+        &mut self,
+        _op: &crate::servo_debug::DeviceOp,
+    ) -> Result<Vec<crate::servo_debug::JointReading>> {
+        Err(IoError::Bus(
+            "servo debugging is unsupported by this backend".into(),
+        ))
+    }
+
     /// One transaction: joints and IMU together.
     fn read(&mut self) -> Result<Sensors>;
     fn write(&mut self, targets: &JointTargets) -> Result<()>;
@@ -213,7 +230,7 @@ pub trait RobotIo {
         Ok(None)
     }
 
-    /// Each servo's impact guard state (register 66 on [`crate::model::IMPACT_GUARD_FIRMWARES`]),
+    /// Each servo's impact guard state (register 66 on [`crate::xl330::config::IMPACT_GUARD_FIRMWARES`]),
     /// in joint order: 0 armed, 1 braking after an impact, 2 holding softly until the goal comes
     /// back past the position. A servo on any other firmware answers whatever its unused register
     /// holds, so the caller masks those out. A transaction of its own, about a millisecond.
@@ -240,7 +257,7 @@ pub trait RobotIo {
 /// Who answered a ping — see [`RobotIo::census`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Census {
-    /// Expected servo IDs ([`crate::model::JOINT_IDS`]) that did not answer, in that order.
+    /// Expected servo IDs ([`crate::JOINT_IDS`]) that did not answer, in that order.
     pub missing: Vec<u8>,
     /// Whether the IMU board answered.
     pub imu_answers: bool,
@@ -266,6 +283,7 @@ pub struct ServoIdentity {
 /// needs no hardware, no network and no Docker. Positions echo back whatever was last
 /// written, so a loop driving it behaves like a servo that tracks perfectly.
 pub struct FakeIo {
+    pub debug_device: crate::servo_debug::SimDevice,
     sensors: Sensors,
     /// Set to make the next [`RobotIo::read`] fail, then cleared. For exercising the
     /// loop's error path without a flaky bus.
@@ -325,6 +343,7 @@ impl Default for FakeIo {
 impl FakeIo {
     pub fn new() -> Self {
         Self {
+            debug_device: crate::servo_debug::SimDevice::default(),
             sensors: Sensors::default(),
             fail_next_read: false,
             fail_reads: 0,
@@ -400,6 +419,25 @@ impl FakeIo {
 }
 
 impl RobotIo for FakeIo {
+    fn debug_imu(&mut self) -> Result<crate::servo_debug::ImuReading> {
+        self.reads += 1;
+        Ok(crate::servo_debug::ImuReading {
+            quat: [1., 0., 0., 0.],
+            gyro: [0.; 3],
+            counter: self.reads as u8,
+        })
+    }
+    fn debug_set_imu_mount(&mut self, _mount: [f64; 4]) -> Result<()> {
+        Ok(())
+    }
+
+    fn servo_debug(
+        &mut self,
+        op: &crate::servo_debug::DeviceOp,
+    ) -> Result<Vec<crate::servo_debug::JointReading>> {
+        self.debug_device.execute(op)
+    }
+
     fn read(&mut self) -> Result<Sensors> {
         if self.fail_next_read {
             self.fail_next_read = false;

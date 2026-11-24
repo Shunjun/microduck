@@ -1,0 +1,112 @@
+{
+  "joints": [
+    {
+      "id": 20,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    },
+    {
+      "id": 21,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    },
+    {
+      "id": 22,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    },
+    {
+      "id": 23,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    },
+    {
+      "id": 24,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    },
+    {
+      "id": 30,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    },
+    {
+      "id": 31,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    },
+    {
+      "id": 32,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    },
+    {
+      "id": 33,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    },
+    {
+      "id": 34,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    },
+    {
+      "id": 10,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    },
+    {
+      "id": 11,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    },
+    {
+      "id": 12,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    },
+    {
+      "id": 13,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    },
+    {
+      "id": 14,
+      "zero_ticks": null,
+      "direction": null,
+      "min_ticks": null,
+      "max_ticks": null
+    }
+  ],
+  "imu_mount": null,
+  "speed_rad_s_per_unit": null,
+  "current_ma_per_unit": null
+}

@@ -1,0 +1,42 @@
+import {Preview} from './preview.js';
+const $=id=>document.getElementById(id),preview=new Preview($('preview'));
+let status=null,page='debug',selected=0,busy=false,rows=[],lastSample=null,lastFresh=0,editing=false;
+const modes={off:'卸力',hold:'固定保持',follow:'柔顺跟随'};
+function notice(text,error=false){$('notice').textContent=text;$('notice').classList.toggle('error',error);}
+async function api(params){const r=await fetch('/api/debug',{method:'POST',headers:{'content-type':'application/json','x-studio':'1'},body:JSON.stringify(params)});const v=await r.json();if(!r.ok||v.error)throw Error(v.error||`HTTP ${r.status}`);return v;}
+async function command(params,message){if(busy)return null;busy=true;try{const s=await api(params);render(s);notice(message||'操作已由 robotd 执行并回执');return s;}catch(e){notice(e.message,true);return null;}finally{busy=false;}}
+const labels=['左髋偏航','左髋侧摆','左髋俯仰','左膝','左踝','颈部俯仰','头部俯仰','头部偏航','头部侧摆','嘴部','右髋偏航','右髋侧摆','右髋俯仰','右膝','右踝'];
+function number(value){const n=value===''?null:Number(value);if(n!==null&&!Number.isInteger(n))throw Error('设置必须为整数');return n;}
+function buildRows(s){rows=s.settings.map((j,i)=>{const tr=document.createElement('tr');const cells=Array.from({length:10},()=>tr.appendChild(document.createElement('td')));const choose=document.createElement('button');choose.className='joint-select';choose.textContent=`${labels[i]} / ${j.id}`;choose.title=s.names[i];choose.onclick=()=>{selected=i;selectJoint();};cells[0].append(choose);
+ const zero=document.createElement('input');zero.type='number';zero.min=0;zero.max=4095;zero.value=j.zero_ticks??'';zero.disabled=true;zero.setAttribute('aria-label',`${labels[i]}零位`);cells[6].append(zero);
+ const direction=document.createElement('select');for(const [v,t] of [['','未设置'],['1','+1'],['-1','−1']]){const o=new Option(t,v);direction.add(o);}direction.value=j.direction??'';direction.setAttribute('aria-label',`${labels[i]}方向`);cells[7].append(direction);
+ const min=document.createElement('input'),max=document.createElement('input');for(const [el,key,label] of [[min,'min_ticks','最小位置'],[max,'max_ticks','最大位置']]){el.type='number';el.min=0;el.max=4095;el.value=j[key]??'';el.setAttribute('aria-label',`${labels[i]}${label}`);cells[key==='min_ticks'?8:9].append(el);el.oninput=()=>editing=true;}direction.onchange=()=>editing=true;
+ $('joints').append(tr);return {tr,cells,zero,direction,min,max};});}
+function selectJoint(){if(!status)return;rows.forEach((r,i)=>r.tr.classList.toggle('selected',i===selected));const j=status.settings[selected],r=status.readings.find(r=>r.id===j.id);$('joint-name').textContent=`${labels[selected]} · ID ${j.id}`;$('ticks').value=r?.ticks??j.zero_ticks??2048;$('position').min=j.min_ticks??0;$('position').max=j.max_ticks??4095;$('position').value=$('ticks').value;$('position-value').textContent=$('ticks').value;$('joint-p').value=r?.p??180;}
+function render(s){const previous=status;status=s;if(!previous)notice('已连接 robotd。进入调试后可回读关节；打开页面不会自动上力。');if(!rows.length)buildRows(s);$('connection').textContent=s.active?'调试模式 · robotd 独占控制':'已连接 · 正常控制';$('led').classList.add('live');$('sim').textContent=s.simulated?'模拟设备':'';$('enter').disabled=s.active;$('exit').disabled=!s.active;
+ if(s.sampled_ms!==lastSample){lastSample=s.sampled_ms;lastFresh=Date.now();}const stale=Date.now()-lastFresh>1500;$('online').textContent=`${s.readings.filter(r=>r.ticks!==null&&!r.error).length} / 15`;$('mode').textContent=modes[s.mode];$('freshness').textContent=!s.active?'未采样':stale?'数据过期':'实时回读';
+ document.querySelectorAll('[data-mode]').forEach(b=>b.classList.toggle('selected',b.dataset.mode===s.mode));
+ const angles=s.settings.map((j,i)=>{const r=s.readings.find(r=>r.id===j.id);return r?.ticks!=null&&j.direction!=null&&j.zero_ticks!=null?j.direction*(r.ticks-j.zero_ticks)*2*Math.PI/4096:s.reference[i];});
+ for(let i=0;i<rows.length;i++){const ui=rows[i],j=s.settings[i],r=s.readings.find(r=>r.id===j.id);ui.cells[1].textContent=r?.ticks??'—';ui.cells[1].title=r?.error??'';ui.cells[1].className=r?.error?'bad':'';ui.cells[2].textContent=r?.ticks!=null&&j.zero_ticks!=null&&j.direction!=null?`${(angles[i]*180/Math.PI).toFixed(1)}°`:'未标定';ui.cells[3].textContent=r?.torque===true?'已使能':r?.torque===false?'已卸力':'未知';ui.cells[4].textContent=r?.p??'—';ui.cells[5].textContent=r?.voltage!=null?`${r.voltage.toFixed(1)} V / ${r.temperature}°`:'—';ui.zero.value=j.zero_ticks??'';
+ if(!editing){ui.direction.value=j.direction??'';ui.min.value=j.min_ticks??'';ui.max.value=j.max_ticks??'';}}
+ preview.pose(page==='calibration'?s.reference:angles);$('preview-help').textContent=page==='calibration'?'固定标准姿态：请照此摆正实物，不随实物运动':stale&&s.active?'反馈已过期：保留最后姿态':s.settings.some(j=>j.zero_ticks==null)?'未标定关节按标准姿态显示，不能代表实测动作':'拖动旋转 · 滚轮缩放';
+ if(!previous||(!busy&&previous.readings.length===0&&s.readings.length))selectJoint();
+ $('imu-status').textContent=s.imu_error?`身体 IMU：${s.imu_error}`:s.imu?`身体 IMU 在线 · gyro ${s.imu.gyro.map(v=>v.toFixed(3)).join(' / ')} rad/s`:'等待身体 IMU 数据';
+ if(document.activeElement!==$('imu-mount')&&!$('imu-mount').dataset.edited)$('imu-mount').value=s.imu_mount?JSON.stringify(s.imu_mount):'';
+ $('calibration-result').textContent=s.saved?`已保存：${s.saved}`:'';
+ if(s.error)notice(s.error,true);
+}
+$('enter').onclick=()=>command({op:'enter'},'已进入调试并卸力。请扶稳鸭子；配置方向与限位后可开启保持。');$('exit').onclick=()=>command({op:'exit'},'已退出调试并卸力。不会自动恢复行走。');$('unload').onclick=()=>command({op:'torque',id:null,on:false},'已请求全部卸力，请查看扭矩回读。');$('scan').onclick=()=>command({op:'scan'},'已刷新舵机读数');
+$('hold-p').oninput=()=>$('p-value').textContent=$('hold-p').value;
+for(const b of document.querySelectorAll('[data-mode]'))b.onclick=()=>command({op:'mode',mode:b.dataset.mode,p:Number($('hold-p').value)});
+$('position').oninput=()=>{$('ticks').value=$('position').value;$('position-value').textContent=$('position').value;};$('ticks').oninput=()=>{$('position').value=$('ticks').value;$('position-value').textContent=$('ticks').value;};
+$('move-joint').onclick=()=>status&&command({op:'position',id:status.settings[selected].id,ticks:Number($('ticks').value)},'目标已接受，按小步推进；实测值会持续回读。');$('set-p').onclick=()=>status&&command({op:'gain',id:status.settings[selected].id,p:Number($('joint-p').value)});$('joint-off').onclick=()=>status&&command({op:'torque',id:status.settings[selected].id,on:false});
+$('apply-settings').onclick=()=>{if(!status)return;try{const joints=status.settings.map((j,i)=>({...j,direction:number(rows[i].direction.value),min_ticks:number(rows[i].min.value),max_ticks:number(rows[i].max.value)}));command({op:'settings',joints},'方向和限位已应用到本次会话，设置零位时一并保存。').then(s=>{if(s){editing=false;render(s);selectJoint();}});}catch(e){notice(e.message,true);}};
+$('home').onclick=()=>{if(confirm('让全部关节缓慢回归当前标定的标准姿态？请确认鸭子有支撑、关节运动空间足够。'))command({op:'home'},'正在回归标准零位姿态。');};
+$('set-zero').onclick=async()=>{if(!confirm('确认实物已摆成左侧标准姿态并稳定？将采集当前位置、更新软件零位并备份原文件。'))return;const capture=await command({op:'capture'},'已采集标准姿态，正在保存…');if(capture)await command({op:'save'},'零位已保存，旧配置已备份。回归零位将使用这份标定。');};
+$('reset-view').onclick=()=>preview.reset();for(const button of document.querySelectorAll('[data-page]'))button.onclick=()=>{page=button.dataset.page;document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b===button));$('title').textContent=page==='calibration'?'把现在，定义为零位。':'让每个关节，就位。';$('subtitle').textContent=page==='calibration'?'左侧始终显示固定标准姿态。校准实物，保存属于这只鸭子的零位。':'回读真实位置，逐一检查舵机，调整关节的保持力度。';$('debug-controls').hidden=page==='calibration';$('calibration-controls').hidden=page!=='calibration';$('preview-title').textContent=page==='calibration'?'标准零位姿态 · 固定参照':'实测姿态';$('preview-badge').textContent=page==='calibration'?'REFERENCE POSE':'LIVE VIEW';if(status)render(status);};
+preview.load().catch(e=>notice(e.message,true));
+async function poll(){if(!busy&&document.visibilityState==='visible')try{render(await api({op:'status'}));}catch(e){$('led').classList.remove('live');$('connection').textContent='运行端未连接';notice(`${e.message}。请确认 robotd 版本及 socket。`,true);}setTimeout(poll,300);}poll();
+
+$('imu-mount').oninput=()=>$('imu-mount').dataset.edited='1';
+$('imu-calibrate').onclick=async()=>{if(!confirm('确认鸭子已直立放在桌面并保持静止？该按钮只校准身体 IMU，不更改舵机零位。'))return;try{const text=$('imu-mount').value.trim(),mount=text?JSON.parse(text):null;const result=await command({op:'imu_capture',mount},'IMU 静态采样通过，正在保存…');if(result)await command({op:'imu_save'},'身体 IMU 校准已独立保存；原文件已备份。');}catch(e){notice(e.message,true);}};

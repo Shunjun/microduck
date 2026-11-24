@@ -256,6 +256,24 @@ fn the_artifact_carries_what_install_sh_reads() {
     }
 }
 
+#[test]
+fn studio_is_the_default_web_service_and_media_is_optional() {
+    for workflow in PACKAGING_SITES {
+        let entries = packaged_release(workflow);
+        assert!(
+            entries.contains_key("bin/studio"),
+            "{workflow}: missing studio binary"
+        );
+        let service = String::from_utf8_lossy(&entries["systemd/studio.service"].1);
+        assert!(service.contains("[Install]"));
+        assert!(service.contains("/opt/robot/daemon/current/bin/studio"));
+        assert!(service.contains("0.0.0.0:8080"));
+        assert!(entries.contains_key("systemd/sysusers.d/studio.conf"));
+        assert!(!entries.contains_key("systemd/mediad.service"));
+        assert!(entries.contains_key("optional-systemd/mediad.service"));
+    }
+}
+
 /// Every unit in the artifact must be able to exec what it names, out of wherever it names it.
 ///
 /// This is bug 3, asserted against the tarball instead of against the workflow that builds it.
