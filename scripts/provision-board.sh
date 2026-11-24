@@ -715,7 +715,7 @@ if [ -n "$USE_LOCAL" ]; then
     say "sending this clone's provision.sh"
     scp -q "$_local" "$(scp_target /tmp/provision.sh)" || die "could not copy provision.sh"
 else
-    _raw="https://raw.githubusercontent.com/pollen-robotics/microduck/${REF:-main}/scripts/provision.sh"
+    _raw="https://raw.githubusercontent.com/${DUCK_REPO:-Shunjun/microduck}/${REF:-main}/scripts/provision.sh"
     say "having the board fetch provision.sh from ${REF:-main}"
     # Fetched by the board rather than by this machine and copied over: the board is the one
     # that has to be able to reach GitHub with that token, and finding out here would prove
@@ -735,7 +735,7 @@ echo
 # behind by an earlier attempt.
 RUN_ID="$(date +%s).$$"
 
-_env="DUCK_TOKEN='${DUCK_TOKEN:-}' DUCK_RUN_ID=${RUN_ID}"
+_env="DUCK_REPO='${DUCK_REPO:-Shunjun/microduck}' DUCK_TOKEN='${DUCK_TOKEN:-}' DUCK_RUN_ID=${RUN_ID}"
 [ -z "$REF" ]     || _env="${_env} DUCK_REF='${REF}'"
 [ -z "$DEV_KEY" ] || _env="${_env} DUCK_DEV_KEY=/tmp/team.dev.pub"
 [ -z "$WEIRD_BLE" ] || _env="${_env} DUCK_WEIRD_BLE=1"
