@@ -868,6 +868,8 @@ impl Server {
             Call::RobotServoDebug(_)
             | Call::RobotSafeToRestart
             | Call::RobotHealth
+            | Call::RobotHardware
+            | Call::RobotSetHardware(_)
             | Call::RobotModelApi
             | Call::RobotMove(_)
             | Call::RobotHead(_)

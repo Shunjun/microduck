@@ -674,7 +674,8 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// display the tag's sequence ends with. No params; [`IntentResult`] once it has started, so a
 /// client watches [`method::PHOTO_LIST`] for the picture. Answered by `nfcd`; an older one answers
 /// METHOD_NOT_FOUND, by name, which is how a client tells a robot that cannot.
-pub const API_VERSION: u32 = 69;
+/// v70 adds robot.hardware / robot.setHardware; update robotd with Studio.
+pub const API_VERSION: u32 = 70;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -892,6 +893,9 @@ pub mod method {
     pub const ROBOT_SAFE_TO_RESTART: &str = "robot.safeToRestart";
     /// Did the robot come up correctly? The post-update health gate.
     pub const ROBOT_HEALTH: &str = "robot.health";
+    /// Active and configured servo driver; changing it requires a robotd restart.
+    pub const ROBOT_HARDWARE: &str = "robot.hardware";
+    pub const ROBOT_SET_HARDWARE: &str = "robot.setHardware";
     /// Which model API version does this build implement?
     pub const ROBOT_MODEL_API: &str = "robot.modelApi";
 
@@ -1458,6 +1462,8 @@ pub enum Call {
     // ── robot.* ──────────────────────────────────────────────────────────────
     RobotSafeToRestart,
     RobotHealth,
+    RobotHardware,
+    RobotSetHardware(HardwareParams),
     RobotModelApi,
 
     // ── intents ──────────────────────────────────────────────────────────────
@@ -1708,6 +1714,8 @@ impl Call {
             Call::Subscribe => method::SUBSCRIBE,
             Call::RobotSafeToRestart => method::ROBOT_SAFE_TO_RESTART,
             Call::RobotHealth => method::ROBOT_HEALTH,
+            Call::RobotHardware => method::ROBOT_HARDWARE,
+            Call::RobotSetHardware(_) => method::ROBOT_SET_HARDWARE,
             Call::RobotModelApi => method::ROBOT_MODEL_API,
             Call::RobotMove(_) => method::ROBOT_MOVE,
             Call::RobotHead(_) => method::ROBOT_HEAD,
@@ -1816,6 +1824,7 @@ impl Call {
                 | Call::SystemReboot
                 | Call::SystemSetPairingPin(_)
                 // Powering the machine off is at least as disruptive as rebooting it.
+                | Call::RobotSetHardware(_)
                 | Call::RobotServoDebug(_)
                 | Call::RobotShutdown
                 // Bonding a pad to this robot changes what may drive it, which is the most
@@ -2008,6 +2017,7 @@ impl Call {
 
             // The skill table. `robotd` writes it and reloads itself afterwards, so one call is
             // enough — and it is the daemon that has to accept the result either way.
+            Call::RobotHardware | Call::RobotSetHardware(_) => (Robot, Slow),
             Call::RobotSkills | Call::RobotSetSkill(_) | Call::RobotRemoveSkill(_) => (Robot, Slow),
             // Re-sweeps the radio rather than returning the last scan.
             Call::NetScan => (Config, Slow),
@@ -2134,6 +2144,8 @@ impl Call {
             Call::PadPair(p) => encode(p),
             Call::PadForget(p) => encode(p),
             Call::PadBind(p) => encode(p),
+            Call::RobotHardware => Value::Object(serde_json::Map::new()),
+            Call::RobotSetHardware(p) => encode(p),
             Call::RobotSetSkill(p) => encode(p),
             Call::RobotRemoveSkill(p) => encode(p),
             Call::Status
@@ -2207,6 +2219,8 @@ impl Call {
             method::SUBSCRIBE => Call::Subscribe,
             method::ROBOT_SAFE_TO_RESTART => Call::RobotSafeToRestart,
             method::ROBOT_HEALTH => Call::RobotHealth,
+            method::ROBOT_HARDWARE => Call::RobotHardware,
+            method::ROBOT_SET_HARDWARE => Call::RobotSetHardware(decode(params)?),
             method::ROBOT_MODEL_API => Call::RobotModelApi,
             method::ROBOT_SERVO_DEBUG => Call::RobotServoDebug(decode(params)?),
             method::ROBOT_MOVE => Call::RobotMove(decode(params)?),
@@ -2869,6 +2883,19 @@ pub struct ComponentParams {
 // `--laser-fk-neck-sign` and `--imu-z-rotation-deg` precisely because the convention was
 // never written down, so every new consumer determined it empirically and disagreed.
 // Fixing it in the protocol deletes that entire category of flag.
+
+/// Persisted servo protocol choice. robotd validates the label before changing the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HardwareParams {
+    pub servo_driver: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HardwareResult {
+    pub active_driver: String,
+    pub configured_driver: String,
+    pub restart_required: bool,
+}
 
 /// Velocity twist. Continuous intent — see [`method::ROBOT_MOVE`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -8914,6 +8941,30 @@ mod tests {
         assert_eq!(
             silent.details(),
             vec!["  https://huggingface.co/a/b/resolve/main/preview.mp4"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod hardware_protocol_tests {
+    use super::*;
+    #[test]
+    fn hardware_calls_round_trip_and_only_the_write_is_mutating() {
+        for call in [
+            Call::RobotHardware,
+            Call::RobotSetHardware(HardwareParams {
+                servo_driver: "xl330".into(),
+            }),
+        ] {
+            let request = Request::call(Id::Number(1), &call);
+            assert_eq!(request.as_call().unwrap(), call);
+        }
+        assert!(!Call::RobotHardware.is_mutating());
+        assert!(
+            Call::RobotSetHardware(HardwareParams {
+                servo_driver: "xl330".into()
+            })
+            .is_mutating()
         );
     }
 }

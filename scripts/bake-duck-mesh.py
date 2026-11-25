@@ -12,14 +12,19 @@ Rerun when the robot's model changes:
 
     scripts/bake-duck-mesh.py ~/MISC/microduck_app/robot_assets/alpha/robot_walk.xml
 
+For the web preview, retain every original visual triangle and part:
+
+    scripts/bake-duck-mesh.py ../microduck_rl/src/mjlab_microduck/robot/microduck/robot_walk.xml \
+        --detail full --out studio/assets/duck.bin
+
 Needs python3 + numpy, which never runs on the board — this is a dev-machine tool.
 
 The output format is read by `robotctl/src/duck.rs`; the two must agree, and the
 format version in the header is how a mismatch fails loudly instead of drawing garbage.
 """
 
+import argparse
 import struct
-import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -115,6 +120,12 @@ def flat_coords(tris: np.ndarray) -> np.ndarray:
     return tris.reshape(-1, 3).astype(np.float64)
 
 
+def index_mesh(tris: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Share identical corners without moving vertices, dropping faces or changing winding."""
+    vertices, inverse = np.unique(tris.reshape(-1, 3), axis=0, return_inverse=True)
+    return vertices.astype(np.float32), inverse.reshape(-1, 3)
+
+
 def parse_floats(text: str | None, default: str) -> np.ndarray:
     return np.array([float(x) for x in (text or default).split()], dtype=np.float64)
 
@@ -132,9 +143,12 @@ def quat_matrix(q: np.ndarray) -> np.ndarray:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit(__doc__)
-    mjcf_path = Path(sys.argv[1]).expanduser()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mjcf", type=Path)
+    parser.add_argument("--detail", choices=("terminal", "full"), default="terminal")
+    parser.add_argument("--out", type=Path)
+    args = parser.parse_args()
+    mjcf_path = args.mjcf.expanduser()
     root = ET.parse(mjcf_path).getroot()
     mesh_dir = mjcf_path.parent / root.find("compiler").get("meshdir", ".")
 
@@ -151,11 +165,17 @@ def main() -> None:
     def mesh_index(name: str) -> int:
         if name not in meshes:
             tris = load_stl(mesh_dir / f"{name}.stl")
-            diag_mm = float(np.linalg.norm(tris.max(axis=(0, 1)) - tris.min(axis=(0, 1)))) * 1000
-            # Sized for a ~100-pixel-tall display and a CPU that must also run the
-            # robot: past this the extra triangles change nothing a cell can show.
-            budget = int(np.clip(40 + diag_mm * 3.5, 60, 420))
-            meshes[name] = decimate(tris, budget)
+            if args.detail == "full":
+                meshes[name] = index_mesh(tris)
+            else:
+                # //Compatible: retain the original terminal bake by default.
+                # Its ~100-pixel display cannot express the CAD's full detail.
+                diag_mm = float(np.linalg.norm(tris.max(axis=(0, 1)) - tris.min(axis=(0, 1)))) * 1000
+                budget = int(np.clip(40 + diag_mm * 3.5, 60, 420))
+                meshes[name] = decimate(tris, budget)
+            vertices, faces = meshes[name]
+            if len(vertices) > 65535 or len(faces) > 65535:
+                raise SystemExit(f"{name}: exceeds the DUCK v1 per-mesh index/count limit")
         return list(meshes).index(name)
 
     bodies: list[dict] = []
@@ -177,7 +197,7 @@ def main() -> None:
             if geom.get("class") != "visual" or geom.get("type") != "mesh":
                 continue
             name = geom.get("mesh")
-            if name in HIDDEN:
+            if args.detail == "terminal" and name in HIDDEN:
                 continue
             parts.append(
                 {
@@ -211,8 +231,10 @@ def main() -> None:
         out += p["pos"].astype("<f4").tobytes()
         out += p["quat"].astype("<f4").tobytes()
 
-    dest = Path(__file__).resolve().parent.parent / "robotctl" / "assets" / "duck.bin"
-    dest.parent.mkdir(exist_ok=True)
+    package = "studio" if args.detail == "full" else "robotctl"
+    dest = args.out or Path(__file__).resolve().parent.parent / package / "assets" / "duck.bin"
+    dest = dest.expanduser()
+    dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(out)
 
     drawn = sum(len(meshes[list(meshes)[p["mesh"]]][1]) for p in parts)

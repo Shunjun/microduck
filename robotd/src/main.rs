@@ -69,8 +69,12 @@ type PowerOff = Arc<dyn Fn() + Send + Sync>;
 // API 2 adds explicit recurrent state; API 1 feed-forward models remain supported.
 const MODEL_API: u32 = 2;
 
-//Compatible: change only this constant to select the motor protocol, then rebuild.
-const MOTOR_DRIVER: hardware::MotorDriver = hardware::MotorDriver::Feetech1910;
+fn motor_driver(driver: params::ServoDriver) -> hardware::MotorDriver {
+    match driver {
+        params::ServoDriver::Xl330 => hardware::MotorDriver::Xl330,
+        params::ServoDriver::Feetech1910 => hardware::MotorDriver::Feetech1910,
+    }
+}
 /// Feetech encoder/mount/unit calibration; IDs retain the original joint order.
 const FEETECH_CALIBRATION_PATH: &str = "/etc/robot/feetech1910.json";
 
@@ -879,6 +883,7 @@ struct RobotState {
     /// to write, because `padd` re-reads `[pad]` from the file every second — a binding held only
     /// in memory would be reverted before anybody let go of the phone.
     config_path: PathBuf,
+    servo_driver: params::ServoDriver,
     /// Whether this robot can make a sound at all: audio enabled, and a bank with wavs in
     /// it. Same job as the `policy_*` fields above — false is "this robot cannot do that",
     /// which is what lets `dispatch` refuse a `robot.sound` with a reason instead of
@@ -1002,6 +1007,7 @@ impl RobotState {
             )),
             policy_enabled: params.policy.enabled,
             config_path: config_path.to_owned(),
+            servo_driver: params.bus.driver,
             has_voice: params.audio.enabled && has_any_wav(&params.audio.bank),
             emotions: emotion::Library::load_release(&params.emotions.dir),
             theremin_ready: AtomicBool::new(false),
@@ -1196,7 +1202,7 @@ impl RobotState {
             return Some(format!(
                 "the IMU board (id {}) is not answering on the motor bus {after}; \
                  is it plugged in?",
-                MOTOR_DRIVER.imu_id(),
+                motor_driver(self.servo_driver).imu_id(),
             ));
         }
         None
@@ -1293,10 +1299,6 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
-    tracing::info!(
-        driver = MOTOR_DRIVER.name(),
-        "motor driver selected at build time"
-    );
     let explicit = args.params.is_some();
     let params_path = args
         .params
@@ -1329,6 +1331,16 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    tracing::info!(
+        driver = motor_driver(params.bus.driver).name(),
+        "motor driver selected from configuration"
+    );
+    if args.servo_debug && params.bus.driver != params::ServoDriver::Feetech1910 {
+        tracing::error!(
+            "--servo-debug commissioning currently supports only feetech1910; no alternate protocol will be opened"
+        );
+        return ExitCode::FAILURE;
+    }
     if let Some(port) = args.port.clone() {
         params.bus.port = port;
     }
@@ -1337,7 +1349,7 @@ async fn main() -> ExitCode {
     }
 
     #[cfg(target_os = "linux")]
-    if MOTOR_DRIVER == hardware::MotorDriver::Feetech1910
+    if params.bus.driver == params::ServoDriver::Feetech1910
         && !args.servo_debug
         && ((!args.fake && args.sim.is_none()) || args.command.is_some())
         && let Err(error) = hardware::load_feetech_config(&args.servo_calibration)
@@ -1760,7 +1772,7 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
             state.vetbook.adopted(id);
         }
         if let Some(mut io) = opened {
-            match imu_answers(&mut io, attempt) {
+            match imu_answers(&mut io, attempt, bus.driver) {
                 Some(true) => {
                     state.startup_bus_failures.store(0, Ordering::Relaxed);
                     state.bus_missing.store(Arc::new(Vec::new()));
@@ -1830,7 +1842,7 @@ fn open_bus(
     let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
     let port = bus.port.as_str();
 
-    if MOTOR_DRIVER == hardware::MotorDriver::Feetech1910 {
+    if bus.driver == params::ServoDriver::Feetech1910 {
         return match BusIo::open_feetech(port, calibration) {
             Ok(io) => {
                 if loud {
@@ -1902,9 +1914,9 @@ fn open_bus(
 ///
 /// `None` when the ping could not be made at all, which says nothing about the board.
 #[cfg(target_os = "linux")]
-fn imu_answers(io: &mut BusIo, attempt: u32) -> Option<bool> {
+fn imu_answers(io: &mut BusIo, attempt: u32, driver: params::ServoDriver) -> Option<bool> {
     let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
-    let id = MOTOR_DRIVER.imu_id();
+    let id = motor_driver(driver).imu_id();
     match io.imu_answers() {
         Ok(true) => Some(true),
         Ok(false) => {
@@ -1927,7 +1939,7 @@ fn imu_answers(io: &mut BusIo, attempt: u32) -> Option<bool> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn imu_answers(_io: &mut BusIo, _attempt: u32) -> Option<bool> {
+fn imu_answers(_io: &mut BusIo, _attempt: u32, _driver: params::ServoDriver) -> Option<bool> {
     Some(true)
 }
 
@@ -5389,6 +5401,22 @@ async fn handle(
         };
 
         if request.method == proto::method::ROBOT_SERVO_DEBUG {
+            if state.servo_driver != params::ServoDriver::Feetech1910 {
+                if let Some(id) = request.id.clone() {
+                    write_line(
+                        &mut write_half,
+                        &proto::Response::err(
+                            Some(id),
+                            proto::Error::new(
+                                proto::code::INVALID_PARAMS,
+                                "当前驱动为 xl330，网页舵机调试仅支持 feetech1910",
+                            ),
+                        ),
+                    )
+                    .await?;
+                }
+                continue;
+            }
             if let Some(id) = request.id.clone() {
                 let reply = match serde_json::from_value::<servo_debug::Request>(
                     request.params.clone().unwrap_or_default(),
@@ -5419,6 +5447,9 @@ async fn handle(
                 "robot.safeToRestart",
                 "robot.subscribe",
                 "robot.modelApi",
+                "robot.hardware",
+                "robot.setHardware",
+                "robot.skills",
             ];
             if !allowed.contains(&request.method.as_str()) {
                 if request.method == "robot.relax" || request.method == "robot.stop" {
@@ -6187,6 +6218,28 @@ fn queue_skill(state: &RobotState, intents: &Intents, skill: &str) -> bool {
     }
 }
 
+fn hardware_report(state: &RobotState) -> Result<proto::HardwareResult, String> {
+    let configured = Params::load(&state.config_path, false)
+        .map_err(|e| e.to_string())?
+        .bus
+        .driver;
+    Ok(proto::HardwareResult {
+        active_driver: state.servo_driver.as_str().into(),
+        configured_driver: configured.as_str().into(),
+        restart_required: configured != state.servo_driver,
+    })
+}
+fn set_hardware(
+    state: &RobotState,
+    p: &proto::HardwareParams,
+) -> Result<proto::HardwareResult, String> {
+    if !matches!(p.servo_driver.as_str(), "xl330" | "feetech1910") {
+        return Err("servo_driver must be xl330 or feetech1910".into());
+    }
+    params::edit::set_key(&state.config_path, "bus.driver", &p.servo_driver)?;
+    hardware_report(state)
+}
+
 fn dispatch(
     state: &RobotState,
     intents: &Intents,
@@ -6194,6 +6247,18 @@ fn dispatch(
     call: &proto::Call,
 ) -> proto::Response {
     match call {
+        proto::Call::RobotHardware => match hardware_report(state) {
+            Ok(result) => proto::Response::ok(Some(id), &result),
+            Err(e) => {
+                proto::Response::err(Some(id), proto::Error::new(proto::code::INTERNAL_ERROR, e))
+            }
+        },
+        proto::Call::RobotSetHardware(p) => match set_hardware(state, p) {
+            Ok(result) => proto::Response::ok(Some(id), &result),
+            Err(e) => {
+                proto::Response::err(Some(id), proto::Error::new(proto::code::INVALID_PARAMS, e))
+            }
+        },
         proto::Call::RobotServoDebug(_) => proto::Response::err(
             Some(id),
             proto::Error::new(
@@ -11956,5 +12021,46 @@ mod tests {
         // And the filter still works afterwards: the next real command slews as always.
         slew(&mut ema, 1.0, 0.3);
         assert!((ema - 0.65).abs() < 1e-12, "{}", ema);
+    }
+}
+
+#[cfg(test)]
+mod hardware_config_tests {
+    use super::*;
+    #[test]
+    fn saves_driver_without_hot_switching_and_reloads_it_on_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("robotd.toml");
+        std::fs::write(&path, "[bus]\ndriver = \"feetech1910\"\n").unwrap();
+        let params = Params::load(&path, true).unwrap();
+        let state = RobotState::new(&params, &path, false, false);
+        let result = set_hardware(
+            &state,
+            &proto::HardwareParams {
+                servo_driver: "xl330".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.active_driver, "feetech1910");
+        assert_eq!(result.configured_driver, "xl330");
+        assert!(result.restart_required);
+        let before = std::fs::read(&path).unwrap();
+        assert!(
+            set_hardware(
+                &state,
+                &proto::HardwareParams {
+                    servo_driver: "pwm".into()
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let restarted = Params::load(&path, true).unwrap();
+        assert_eq!(
+            motor_driver(restarted.bus.driver),
+            hardware::MotorDriver::Xl330
+        );
+        let state = RobotState::new(&restarted, &path, false, false);
+        assert!(!hardware_report(&state).unwrap().restart_required);
     }
 }

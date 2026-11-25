@@ -13,14 +13,16 @@
 ## 实现范围
 
 `duck-control::feetech1910` 提供串口总线、HD1910 反馈和目标位置写入、IMU 解码及 `RobotIo` 适配器。
-`robotd/src/main.rs` 的 `MOTOR_DRIVER` 常量选择实际后端：
+实际后端由 robotd TOML 配置决定：
 
-```rust
-const MOTOR_DRIVER: hardware::MotorDriver = hardware::MotorDriver::Feetech1910;
-// 原版：hardware::MotorDriver::Xl330
+```toml
+[bus]
+driver = "feetech1910" # 或 "xl330"
 ```
 
-改常量后需要重新编译；启动日志会显示所选驱动。不自动扫描或猜测协议。
+默认沿用本分叉的 `feetech1910`。同一配置驱动启动校验、普通控制、init、IMU 识别和调试；启动日志记录实际选择。不扫描或猜测协议。修改后重启 robotd 生效，无需重编译，也不会热切换正在使用的总线。
+Studio 的「配置 → 硬件」通过 `robot.hardware`/`robot.setHardware` 读取当前与已保存驱动、写入相同配置层；返回 `restart_required`。写入使用 robotd-params 的校验及原子保存，不由网页服务直接修改 `/etc`。当前网页舵机调试和 `--servo-debug` 装机模式仅支持飞特，选择 XL330 会明确拒绝这些接口，普通 XL330 运行保持原驱动。
+
 串口由 `[bus].port` 或 `--port` 指定，与舵机品牌无关；香橙派配原版 HAT 使用 `/dev/ttyS0`：
 
 ```toml

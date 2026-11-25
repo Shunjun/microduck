@@ -3016,9 +3016,29 @@ impl Default for SafetyParams {
     }
 }
 
+/// Servo protocol selected once at process startup; changes require a robotd restart.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServoDriver {
+    Xl330,
+    //Compatible: an absent bus.driver retains this fork's previous Feetech entry point.
+    #[default]
+    Feetech1910,
+}
+impl ServoDriver {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Xl330 => "xl330",
+            Self::Feetech1910 => "feetech1910",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Bus {
+    /// Servo protocol. All bus paths use this value; restart robotd after editing.
+    pub driver: ServoDriver,
     /// Serial port the servos and the IMU board share. The Radxa Zero 3W wires them to
     /// `/dev/ttyS2`.
     pub port: String,
@@ -3186,6 +3206,7 @@ pub const BOOT_DEADLINE_MAX_S: u32 = 300;
 impl Default for Bus {
     fn default() -> Self {
         Self {
+            driver: ServoDriver::Feetech1910,
             port: "/dev/ttyS2".into(),
             fast_sync_read: true,
             impact_guard: false,
@@ -5834,5 +5855,22 @@ mod tests {
             !Params::default().update_gate.auto_rollback,
             "off unless asked for"
         );
+    }
+}
+
+#[cfg(test)]
+mod servo_driver_tests {
+    use super::*;
+    #[test]
+    fn driver_is_an_explicit_validated_startup_setting() {
+        assert_eq!(Params::default().bus.driver, ServoDriver::Feetech1910);
+        for (name, driver) in [
+            ("xl330", ServoDriver::Xl330),
+            ("feetech1910", ServoDriver::Feetech1910),
+        ] {
+            let p: Params = toml::from_str(&format!("[bus]\ndriver=\"{name}\"\n")).unwrap();
+            assert_eq!(p.bus.driver, driver);
+        }
+        assert!(toml::from_str::<Params>("[bus]\ndriver=\"pwm\"\n").is_err());
     }
 }
