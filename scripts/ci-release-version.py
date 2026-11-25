@@ -45,12 +45,17 @@ def choose_version(branch, tags, workspace_version, sha):
     return text, tag
 
 
-def reserve(branch, sha, workspace_version, read_tags, create_tag):
+def reserve(branch, sha, workspace_version, read_tags, create_tag, is_ancestor=None):
     for _ in range(8):
         tags = read_tags()
         version, tag = choose_version(branch, tags, workspace_version, sha)
         if tag in tags:
             return version, tag
+        # Two merged PR jobs may start out of order. Never give an older commit a
+        # new higher version when a tagged descendant already contains that PR.
+        if is_ancestor and any(commit != sha and is_ancestor(sha, commit)
+                               for name, commit in tags.items() if tag_version(name)):
+            return None
         try:
             create_tag(tag, sha)
             return version, tag
@@ -120,10 +125,22 @@ def main():
                         "-f", f"ref=refs/tags/{tag}", "-f", f"sha={sha}"],
                        check=True, stdout=subprocess.DEVNULL)
 
-    version, tag = reserve(args.branch, args.sha, package_version(cargo.read_text()),
-                           read_tags, create_tag)
+    def is_ancestor(older, newer):
+        command = ["git", "merge-base", "--is-ancestor", older, newer]
+        result = subprocess.run(command)
+        if result.returncode not in (0, 1):
+            raise subprocess.CalledProcessError(result.returncode, command)
+        return result.returncode == 0
+
+    plan = reserve(args.branch, args.sha, package_version(cargo.read_text()),
+                   read_tags, create_tag, is_ancestor)
     with args.output.open("a") as output:
-        output.write(f"version={version}\ntag={tag}\n")
+        if plan is None:
+            output.write("publish=false\n")
+            print("Skipping an older merged commit already contained in a tagged release")
+            return
+        version, tag = plan
+        output.write(f"publish=true\nversion={version}\ntag={tag}\n")
     print(f"{args.branch} -> {tag} at {args.sha}")
 
 

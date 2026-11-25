@@ -52,6 +52,15 @@ class ReleaseVersionTest(unittest.TestCase):
         self.assertEqual(result, ("1.2.5", "daemon-v1.2.5"))
         self.assertEqual(calls, ["daemon-v1.2.4", "daemon-v1.2.5"])
 
+    def test_out_of_order_older_merge_is_not_published_as_a_higher_version(self):
+        tags = {"daemon-v1.2.4": "newer"}
+        created = []
+        result = release.reserve("feat/old", "older", "1.2.3", lambda: tags,
+                                 lambda *args: created.append(args),
+                                 lambda older, newer: (older, newer) == ("older", "newer"))
+        self.assertIsNone(result)
+        self.assertEqual(created, [])
+
     def test_auth_or_network_failure_is_not_treated_as_a_collision(self):
         def fail(*_):
             raise subprocess.CalledProcessError(1, ["gh"])

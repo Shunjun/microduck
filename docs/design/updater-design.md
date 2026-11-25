@@ -1500,7 +1500,9 @@ otherwise the highest numeric stable `daemon-vX.Y.Z` tag supplies X/Y and Z is i
 Staging/dev/prerelease tags do not participate. With no stable tag, the workspace Cargo version
 is the baseline and its patch is incremented. `scripts/ci-release-version.py` owns this selection.
 A rerun reuses a stable tag already pointing at that merged commit. Existing tags on another
-commit are never moved; automatic patch reservations retry a concurrent tag collision.
+commit are never moved; automatic patch reservations retry a concurrent tag collision. A delayed job for an older
+merged commit is skipped when a tagged descendant already includes it, so concurrent merges
+cannot publish old code under a new higher version.
 
 The privileged `pull_request_target: closed` entry runs only after `merged == true`, checks out
 only `merge_commit_sha`, and asserts that checkout before creating the ref. It never executes an

@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      publish: ${{ steps.reserve.outputs.publish }}
       version: ${{ steps.reserve.outputs.version }}
       tag: ${{ steps.reserve.outputs.tag }}
     steps:
@@ -39,6 +40,7 @@ jobs:
 
   publish:
     needs: version
+    if: needs.version.outputs.publish == 'true'
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ needs.version.outputs.tag }}
