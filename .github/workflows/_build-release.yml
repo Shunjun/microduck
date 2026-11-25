@@ -48,7 +48,7 @@ jobs:
           # event the default is the release's target commitish, which is a branch head when
           # someone drafts a release against a branch — and that is not necessarily what the tag
           # points at by the time this runs.
-          ref: ${{ inputs.tag }}
+          ref: refs/tags/${{ inputs.tag }}
           # Full history so the recorded revision is meaningful.
           fetch-depth: 0
 

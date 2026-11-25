@@ -117,7 +117,7 @@ def main():
     def read_tags():
         subprocess.run(["git", "fetch", "--tags", "origin"], check=True)
         tags = run("git", "tag", "--list", "daemon-v*").splitlines()
-        return {tag: run("git", "rev-parse", tag + "^{commit}")
+        return {tag: run("git", "rev-parse", "refs/tags/" + tag + "^{commit}")
                 for tag in tags if tag_version(tag) is not None}
 
     def create_tag(tag, sha):
