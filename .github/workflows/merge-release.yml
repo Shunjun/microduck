@@ -1,0 +1,45 @@
+# Only trusted, merged code is checked out. Never check out the PR head in this privileged event.
+name: release merged PR
+on:
+  pull_request_target:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: merge-release-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.reserve.outputs.version }}
+      tag: ${{ steps.reserve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+      - name: Reserve version from source branch
+        id: reserve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
+          MERGED_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python3 scripts/ci-release-version.py reserve \
+            --branch="$SOURCE_BRANCH" --sha="$MERGED_SHA" \
+            --repo="$GH_REPO" --output="$GITHUB_OUTPUT"
+
+  publish:
+    needs: version
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.version.outputs.tag }}
+    secrets: inherit

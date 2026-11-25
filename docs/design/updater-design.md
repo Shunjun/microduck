@@ -1485,14 +1485,35 @@ pass/fail + the update log. Repeatable because reset-to-golden and
 
 ### 16.3 Channels & promotion
 
-**Implemented** as three GitHub Actions workflows plus a `cargo xtask` publisher
+**Implemented** as GitHub Actions workflows plus a `cargo xtask` publisher
 (`.github/workflows/`, `xtask/`):
 
 | | |
 |---|---|
 | `ci.yml` | fmt, clippy, tests, plus `board-test.sh` — the only job that proves the binaries run on aarch64 Linux |
+| `merge-release.yml` | on a PR merged into `main`: reserve its version tag, then call `release.yml` directly |
 | `release.yml` | on a `daemon-staging-v*` tag: cross-build, package, sign, **verify with the robot's own code path**, publish a prerelease |
 | `promote.yml` | manual: re-sign a *stable* manifest, copy the validated artifact onto the stable release, retire staging |
+
+Merged-PR versioning uses the **source branch**: an exact `daemon-vX.Y.Z` supplies the version;
+otherwise the highest numeric stable `daemon-vX.Y.Z` tag supplies X/Y and Z is incremented.
+Staging/dev/prerelease tags do not participate. With no stable tag, the workspace Cargo version
+is the baseline and its patch is incremented. `scripts/ci-release-version.py` owns this selection.
+A rerun reuses a stable tag already pointing at that merged commit. Existing tags on another
+commit are never moved; automatic patch reservations retry a concurrent tag collision.
+
+The privileged `pull_request_target: closed` entry runs only after `merged == true`, checks out
+only `merge_commit_sha`, and asserts that checkout before creating the ref. It never executes an
+unmerged PR head. Its `contents: write` GITHUB_TOKEN creates the ref, then the workflow calls
+`release.yml` with that tag and inherited secrets: a token-created push would not trigger another
+push workflow. The existing stable/staging/promotion decision and `release` environment remain
+in charge; no extra PAT or signing key is required. Creating a PR or closing it without merging
+publishes nothing.
+
+For a build, the selected version is stamped into `[workspace.package].version` **in the CI
+checkout only**, so binary and artifact versions agree without an automated commit back to main.
+The binary identity, package manifest and release notes record the checked-out tag's actual Git
+revision rather than the calling event's `GITHUB_SHA`. Promotion continues copying existing bytes.
 
 The publisher is a Rust `xtask` rather than a shell script for one reason: it reuses the
 exact `minisign`, `tar`, `zstd` and `sha2` crates the updater verifies with. A shell
