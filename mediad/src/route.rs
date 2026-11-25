@@ -52,8 +52,8 @@ pub enum Route {
 fn permits(call: &proto::Call) -> bool {
     use proto::Call::*;
     match call {
-        // Servo commissioning is provided by the dedicated local Studio path.
-        RobotServoDebug(_) => false,
+        // Servo commissioning and hardware configuration use the dedicated local Studio path.
+        RobotServoDebug(_) | RobotHardware | RobotSetHardware(_) => false,
         // The version handshake. Must be reachable or no client can establish anything.
         Hello(_) => true,
 
@@ -392,6 +392,18 @@ pub fn refusal(call: &proto::Call) -> proto::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hardware_configuration_stays_on_the_local_studio_path() {
+        for call in [
+            proto::Call::RobotHardware,
+            proto::Call::RobotSetHardware(proto::HardwareParams {
+                servo_driver: "feetech1910".into(),
+            }),
+        ] {
+            assert_eq!(route_for(&call), Route::Refused, "{}", call.method());
+        }
+    }
 
     /// Everything permitted must be deliverable, for the reason `btd`'s twin of this test exists:
     /// permission and destination are decided in two places, so permitting a call no service
