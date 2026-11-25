@@ -69,4 +69,4 @@ feetech_probe.rs → feetech1910/mod.rs（导出）→ bus.rs
 ```
 
 两套驱动都依赖公共 `io.rs` 的接口与数据，使用公共 `model.rs` 的关节语义；
-飞特模块没有导入 XL330 模块。`robotd/src/main.rs` 的 `MOTOR_DRIVER` 常量决定使用哪一套；`robotd/src/hardware.rs` 统一分派 `RobotIo` 方法。修改常量后重新编译生效，具体配置见[飞特硬件说明](feetech-hardware.md)。
+飞特模块没有导入 XL330 模块。robotd 的 `[bus].driver` 配置决定使用哪一套；`robotd/src/hardware.rs` 统一分派 `RobotIo` 方法。修改配置后重启生效，具体配置见[飞特硬件说明](feetech-hardware.md)。

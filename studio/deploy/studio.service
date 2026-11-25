@@ -1,5 +1,5 @@
 [Unit]
-Description=Microduck Servo Studio
+Description=Microduck Studio
 After=local-fs.target robotd.service
 
 [Service]
@@ -7,6 +7,9 @@ Type=exec
 User=studio
 Group=robot
 ExecStart=/opt/robot/daemon/current/bin/studio --listen 0.0.0.0:8080 --robot-socket /run/robotd.sock
+StateDirectory=microduck-studio
+StateDirectoryMode=0755
+UMask=0022
 Restart=on-failure
 RestartSec=2s
 NoNewPrivileges=yes

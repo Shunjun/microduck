@@ -48,9 +48,12 @@ jobs:
           # event the default is the release's target commitish, which is a branch head when
           # someone drafts a release against a branch — and that is not necessarily what the tag
           # points at by the time this runs.
-          ref: ${{ inputs.tag }}
+          ref: refs/tags/${{ inputs.tag }}
           # Full history so the recorded revision is meaningful.
           fetch-depth: 0
+
+      - name: Record tagged source revision
+        run: echo "DUCK_REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -106,6 +109,7 @@ jobs:
           # daemon-staging-v1.2.3 -> 1.2.3
           # The caller resolved this from the tag; recorded here so the log shows it.
           version="${{ inputs.version }}"
+          python3 scripts/ci-release-version.py stamp --version "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "publishing $version from ${{ inputs.tag }} (prerelease=${{ inputs.prerelease }})"
 
@@ -118,8 +122,6 @@ jobs:
       # still works and reports "rev unknown" — which is exactly what a local build should
       # say, and why they are not required.
       - name: Build for the board
-        env:
-          DUCK_REVISION: ${{ github.sha }}
         run: |
           export DUCK_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           cargo board --bins
@@ -171,7 +173,7 @@ jobs:
             --bin-dir staged \
             --out dist \
             --base-url "https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}" \
-            --revision "${GITHUB_SHA}" \
+            --revision "${DUCK_REVISION}" \
             --include "updater/systemd/updaterd.service=systemd/updaterd.service" \
             --include "updater/systemd/sysusers.d/robot.conf=systemd/sysusers.d/robot.conf" \
             --include "robotd/systemd/robotd.service=systemd/robotd.service" \
@@ -435,7 +437,7 @@ jobs:
         run: |
           if [ "${{ inputs.prerelease }}" = "true" ]; then
             title="daemon ${{ inputs.version }} (staging)"
-            provenance="Staging build from \`${GITHUB_SHA}\`.
+            provenance="Staging build from \`${DUCK_REVISION}\`.
 
           Not for client robots. Promote it — create a release for tag \`daemon-v${{ inputs.version }}\`,
           or run the \`promote\` workflow — once a canary has run the on-device acceptance checks.
@@ -447,7 +449,7 @@ jobs:
             # signature, manifest and a real install, all checked in this job — but not *canaried*:
             # no robot ran these bytes before they became the stable channel.
             title="daemon ${{ inputs.version }}"
-            provenance="Built directly from \`${GITHUB_SHA}\`, with no staging release to promote.
+            provenance="Built directly from \`${DUCK_REVISION}\`, with no staging release to promote.
 
           Verified through the update engine in CI, but **not validated on a robot**. For the
           canaried path, publish a pre-release for \`daemon-staging-v${{ inputs.version }}\` first

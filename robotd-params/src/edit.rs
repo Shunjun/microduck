@@ -897,6 +897,7 @@ pub fn set_slots(path: &Path, slots: &[crate::Slot], to: Option<&Path>) -> Resul
 /// an owner's decisions and freeze them in. `every_live_template_value_is_listed` keeps it
 /// complete going forward. `[board] version` is never adopted and needs no entry.
 const EVER_SHIPPED: &[(&str, &str)] = &[
+    ("bus.driver", "\"feetech1910\""),
     ("bus.port", "\"/dev/ttyS2\""),
     ("control.hz", "50"),
     ("control.cmd_alpha", "0.2"),

@@ -11,10 +11,6 @@ use duck_control::{IoError, JointTargets, NUM_JOINTS, RobotIo, Sensors, SlowSens
 pub use duck_ipc_proto::JOINT_IDS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "The entry point constructs exactly one driver variant at build time"
-)]
 pub enum MotorDriver {
     Xl330,
     Feetech1910,

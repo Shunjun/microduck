@@ -5417,10 +5417,13 @@ version = "0.23.0"
 dependencies = [
  "axum",
  "clap",
+ "duck-control",
  "duck-ipc-proto",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "tokio",
+ "tower",
 ]
 
 [[package]]

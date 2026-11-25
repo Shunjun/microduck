@@ -289,3 +289,5 @@ If `release-1` or CI is compromised:
 
 Step 3 lags step 2 on purpose: revoking the old key before every robot has taken the
 new-signed release would strand any robot that missed it.
+
+Merged-PR automatic releases use the same `release` environment, secrets and public-key variable; no additional PAT is needed. Branch-name and patch-increment rules are maintained in [updater-design.md §16.3](../design/updater-design.md#163-channels--promotion).

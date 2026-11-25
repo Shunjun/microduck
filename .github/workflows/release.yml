@@ -19,7 +19,8 @@
 # reaches client robots is byte-identical to what was validated.
 name: release
 
-# One trigger, deliberately.
+# One external tag trigger, plus a reusable entry for merged PRs.
+# The merged-PR caller creates its ref with GITHUB_TOKEN, so its tag push cannot trigger a second run.
 #
 # Publishing a release in the UI creates the tag, so this fires for the UI path as well as for
 # `git push --tags` — verified both ways. There *was* also a `release: published` trigger, and it made
@@ -30,6 +31,12 @@ name: release
 # That tag's push already built it, so there is nothing to do — and if a build genuinely needs
 # repeating, re-run it from the Actions tab.
 on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Stable or staging tag already reserved by the caller'
+        required: true
+        type: string
   push:
     tags:
       - 'daemon-staging-v*'
@@ -47,7 +54,7 @@ permissions:
 # to cancel for anyway: whoever pushed the same tag twice wants the second attempt to wait, not to
 # make the first look broken.
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -66,8 +73,8 @@ jobs:
     # every branch, and those are not release attempts. Anything else beginning with `daemon-` is
     # someone trying to cut a release, and deserves a red X with the answer in it.
     if: >-
-      startsWith(github.ref_name, 'daemon-') &&
-      !startsWith(github.ref_name, 'daemon-dev-')
+      startsWith(inputs.tag || github.ref_name, 'daemon-') &&
+      !startsWith(inputs.tag || github.ref_name, 'daemon-dev-')
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       version: ${{ steps.plan.outputs.version }}
@@ -78,7 +85,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -eu
           case "$TAG" in
