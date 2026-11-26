@@ -4,6 +4,26 @@ const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]]
 const rotate=(q,v)=>{const t=cross(q.slice(1),v).map(x=>2*x);return add(v,add(t.map(x=>q[0]*x),cross(q.slice(1),t)));};
 const mul=(a,b)=>[a[0]*b[0]-a[1]*b[1]-a[2]*b[2]-a[3]*b[3],a[0]*b[1]+a[1]*b[0]+a[2]*b[3]-a[3]*b[2],a[0]*b[2]-a[1]*b[3]+a[2]*b[0]+a[3]*b[1],a[0]*b[3]+a[1]*b[2]-a[2]*b[1]+a[3]*b[0]];
 const compose=(a,b)=>({p:add(a.p,rotate(a.q,b.p)),q:mul(a.q,b.q)});
+export function bodyOrientation(frame,health,fresh){
+ const imu=health?.imu,q=frame?.imu?.quat;
+ if(!fresh||!imu?.ready||imu.missing||imu.consecutive_stale_blocks>=25)return null;
+ if(!Array.isArray(q)||q.length!==4||!q.every(Number.isFinite))return null;
+ const length=Math.hypot(...q);
+ return length>1e-8?q.map(value=>value/length):null;
+}
+export function skeletonPoses(model,angles,orientation=[1,0,0,0]){
+ const poses=[];
+ for(const body of model.bodies){
+  let pose={p:body.p,q:body.q};
+  if(body.joint>=0){
+   const angle=angles[body.joint]||0,s=Math.sin(angle/2);
+   pose=compose(pose,{p:[0,0,0],q:[Math.cos(angle/2),...body.axis.map(x=>x*s)]});
+  }
+  // Rotate around the trunk origin; the observation camera and floor remain in world space.
+  poses.push(body.parent<0?{p:pose.p,q:mul(orientation,pose.q)}:compose(poses[body.parent],pose));
+ }
+ return poses;
+}
 export function parseMesh(buffer){
  const v=new DataView(buffer);let o=0;
  const n=(method,size)=>()=>{if(o+size>v.byteLength)throw Error('模型数据不完整');const x=v[method](o,true);o+=size;return x;};
@@ -61,6 +81,7 @@ export class Preview {
   constructor(canvas) {
     this.canvas = canvas;
     this.angles = Array(15).fill(0);
+    this.orientation = [1, 0, 0, 0];
     this.yaw = .8;
     this.pitch = .3;
     this.zoom = 1;
@@ -157,7 +178,11 @@ export class Preview {
     this.draw();
   }
 
-  pose(angles) { this.angles = angles; this.draw(); }
+  pose(angles, orientation) {
+    this.angles = angles;
+    if (orientation) this.orientation = orientation;
+    this.draw();
+  }
   reset() { this.yaw = .8; this.pitch = .3; this.zoom = 1; this.draw(); }
   draw() {
     if (this.queued || this.disposed) return;
@@ -237,15 +262,7 @@ export class Preview {
     gl.drawArrays(gl.LINES, 0, this.gridCount);
     gl.depthMask(true);
 
-    const poses = [];
-    for (const body of this.model.bodies) {
-      let pose = { p: body.p, q: body.q };
-      if (body.joint >= 0) {
-        const angle = this.angles[body.joint] || 0, s = Math.sin(angle / 2);
-        pose = compose(pose, { p: [0, 0, 0], q: [Math.cos(angle / 2), ...body.axis.map(x => x * s)] });
-      }
-      poses.push(body.parent < 0 ? pose : compose(poses[body.parent], pose));
-    }
+    const poses = skeletonPoses(this.model, this.angles, this.orientation);
     // Full-resolution CAD stays in static GPU buffers, shared by every repeated part.
     // Only rigid transforms and material colour change as the servos move.
     this.uploadModel();
