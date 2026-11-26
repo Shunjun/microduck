@@ -68,6 +68,9 @@ impl JointReading {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+// Keep the fixed joint configuration inline: control-thread commands never allocate
+// or free an extra box when applying mechanical settings.
+#[allow(clippy::large_enum_variant)]
 pub enum DeviceOp {
     Read,
     Position { id: u8, ticks: u16 },

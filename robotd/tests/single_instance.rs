@@ -12,9 +12,10 @@ struct Robotd(Child);
 
 impl Robotd {
     fn spawn(socket: &Path, extra: &[&str]) -> Self {
-        // An explicit empty config keeps host /etc/robot settings out of the test.
+        // Pin the original bus driver as well as isolating host /etc/robot settings.
+        // Init must reach the deliberately missing port, not fail on Feetech calibration.
         let params = socket.parent().unwrap().join("params.toml");
-        std::fs::write(&params, "").unwrap();
+        std::fs::write(&params, "[bus]\ndriver = \"xl330\"\n").unwrap();
         Self(
             Command::new(env!("CARGO_BIN_EXE_robotd"))
                 .arg("--socket")
