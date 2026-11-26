@@ -1,0 +1,2 @@
+# Generated bundles contain third-party template literals; preserve their whitespace.
+/studio/web-dist/assets/* -whitespace

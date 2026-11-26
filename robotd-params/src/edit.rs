@@ -906,6 +906,8 @@ const EVER_SHIPPED: &[(&str, &str)] = &[
     ("update_gate.min_achieved_hz", "45.0"),
     ("update_gate.max_consecutive_errors", "10"),
     ("safety.gain_limp", "50"),
+    //Compatible: this fork shipped 40/180 as its preset, not Feetech factory values.
+    ("safety.gain_limp", "40"),
     ("safety.fall_gravity_z", "-0.5"),
     ("safety.fall_debounce_ms", "200"),
     ("safety.deadman_ms", "500"),
@@ -914,6 +916,7 @@ const EVER_SHIPPED: &[(&str, &str)] = &[
     ("policy.enabled", "true"),
     ("policy.mode", "\"walk\""),
     ("policy.gain", "200"),
+    ("policy.gain", "180"),
     ("policy.action_scale", "0.7"),
     ("policy.standing_action_scale", "1.0"),
     ("policy.standing_gain_ratio", "0.8"),
@@ -1527,7 +1530,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (base, user) = layered(dir.path(), SHIPPED, None);
         let carried = carried_path(&user);
-        std::fs::write(&carried, "[control]\nhz = 100\n[policy]\ngain = 180\n").unwrap();
+        std::fs::write(&carried, "[control]\nhz = 100\n[policy]\ngain = 179\n").unwrap();
 
         let keys = adopt_base_edits(&base, &user).expect("adopts");
         assert_eq!(keys, ["control.hz", "policy.gain"]);
@@ -1535,7 +1538,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&base).unwrap(), SHIPPED);
         let p = Params::load_layered(&base, &user, true).unwrap();
         assert_eq!(p.control.hz, 100);
-        assert_eq!(p.policy.gain, 180);
+        assert_eq!(p.policy.gain, 179);
     }
 
     /// An edit made before `robotd` ever adopted — `robotctl configure` with the daemon stopped —
@@ -1560,7 +1563,7 @@ mod tests {
     #[test]
     fn the_editor_opens_on_a_robot_whose_edits_have_moved() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (base, user) = layered(dir.path(), "[policy]\ngain = 180\n", None);
+        let (base, user) = layered(dir.path(), "[policy]\ngain = 179\n", None);
         let mut m = Model::adopt_and_load(&base, &user).expect("loads");
         let gain = |m: &Model| {
             m.rows()
@@ -1571,10 +1574,10 @@ mod tests {
         assert_eq!(gain(&m).default, "200", "the built-in, not the old edit");
         assert!(gain(&m).differs());
         m.edit(entry("policy.gain"), "150").expect("valid");
-        m.edit(entry("policy.gain"), "180").expect("valid");
+        m.edit(entry("policy.gain"), "179").expect("valid");
         m.save().expect("saves");
         let p = Params::load_layered(&base, &user, true).unwrap();
-        assert_eq!(p.policy.gain, 180);
+        assert_eq!(p.policy.gain, 179);
     }
 
     /// A strip that would leave a base robotd refuses on its own is not done: the band is valid
@@ -1698,21 +1701,23 @@ mod tests {
         assert_eq!(super::pad_bindings(&path).unwrap().x, "polite-bow");
     }
 
-    /// The shipped example loads into the editor, and every value it does set explicitly is
-    /// the default — the editor-side echo of robotd's own example-matches-defaults test, and
-    /// the reason a fresh robot's config shows no surprising overrides.
+    /// The fork tunes the two motor gains. Any further departure from the library
+    /// defaults needs to be deliberate and visible to the editor.
     #[test]
-    fn the_shipped_example_sets_nothing_away_from_default() {
-        let m = model(SHIPPED);
-        for row in m.rows() {
-            if let Some(set) = &row.set {
-                assert_eq!(
-                    set, &row.default,
-                    "{} is shipped away from its default",
-                    row.entry.key
-                );
-            }
-        }
+    fn the_shipped_example_tunes_only_the_feetech_gains() {
+        let differences: std::collections::BTreeMap<_, _> = model(SHIPPED)
+            .rows()
+            .into_iter()
+            .filter(|row| row.differs())
+            .map(|row| (row.entry.key, (row.default, row.set.unwrap())))
+            .collect();
+        assert_eq!(
+            differences,
+            std::collections::BTreeMap::from([
+                ("policy.gain", ("200".to_owned(), "180".to_owned())),
+                ("safety.gain_limp", ("50".to_owned(), "40".to_owned())),
+            ])
+        );
     }
 
     /// An unset bitrate shows what it will actually stream at, and follows the quality as it

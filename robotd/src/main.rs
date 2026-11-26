@@ -31,7 +31,9 @@ mod leds;
 mod params;
 mod pickup;
 mod posture;
+mod runtime_hardware;
 mod servo_debug;
+use runtime_hardware::{hardware_report, set_hardware};
 mod soc;
 mod soccer;
 mod sound;
@@ -409,12 +411,9 @@ struct Args {
     #[arg(long)]
     no_policy: bool,
 
-    /// Commissioning backend: no policy or IMU required; all operations go through robotd.
-    #[arg(long, conflicts_with = "sim")]
-    servo_debug: bool,
-    /// Software encoder calibration, also used by Servo Studio.
-    #[arg(long, default_value = FEETECH_CALIBRATION_PATH)]
-    servo_calibration: PathBuf,
+    /// Software encoder calibration. An explicit path also exercises commissioning on --fake.
+    #[arg(long)]
+    servo_calibration: Option<PathBuf>,
 
     /// Report unhealthy. For exercising the updater's rollback path on a bench robot
     /// without having to break a real build.
@@ -752,7 +751,20 @@ fn drop_unloadable_overrides_with(
     }
 }
 
+fn commissioning_required(args: &Args, params: &Params) -> bool {
+    params.bus.driver == params::ServoDriver::Feetech1910
+        && args.sim.is_none()
+        && (!args.fake || args.servo_calibration.is_some())
+        && hardware::load_feetech_config(
+            args.servo_calibration
+                .as_deref()
+                .unwrap_or(Path::new(FEETECH_CALIBRATION_PATH)),
+        )
+        .is_err()
+}
+
 struct RobotState {
+    hardware: runtime_hardware::Runtime,
     servo_debug: servo_debug::Hub,
     /// Epoch for every timestamp below. `Instant` so the clock cannot go backwards.
     started: Instant,
@@ -962,6 +974,7 @@ impl RobotState {
         force_busy: bool,
     ) -> Self {
         Self {
+            hardware: runtime_hardware::Runtime::new(params),
             servo_debug: servo_debug::Hub::new(
                 PathBuf::from(FEETECH_CALIBRATION_PATH),
                 false,
@@ -1074,7 +1087,7 @@ impl RobotState {
         let unhealthy = |reason: String| describe(false, false, Some(reason));
         // Not healthy, but not the release's fault either — see `HealthResult::degraded`.
         let degraded = |reason: String| describe(false, true, Some(reason));
-        if self.servo_debug.active.load(Ordering::Relaxed) {
+        if self.servo_debug.blocks_motion() {
             return degraded("servo debug mode owns control; normal policy is paused".into());
         }
 
@@ -1335,30 +1348,19 @@ async fn main() -> ExitCode {
         driver = motor_driver(params.bus.driver).name(),
         "motor driver selected from configuration"
     );
-    if args.servo_debug && params.bus.driver != params::ServoDriver::Feetech1910 {
-        tracing::error!(
-            "--servo-debug commissioning currently supports only feetech1910; no alternate protocol will be opened"
-        );
-        return ExitCode::FAILURE;
-    }
-    if let Some(port) = args.port.clone() {
-        params.bus.port = port;
-    }
-    if args.no_policy || args.servo_debug {
+    let calibration = args
+        .servo_calibration
+        .as_deref()
+        .unwrap_or(Path::new(FEETECH_CALIBRATION_PATH));
+    let commissioning = commissioning_required(&args, &params);
+    if args.no_policy {
         params.policy.enabled = false;
     }
 
-    #[cfg(target_os = "linux")]
-    if params.bus.driver == params::ServoDriver::Feetech1910
-        && !args.servo_debug
-        && ((!args.fake && args.sim.is_none()) || args.command.is_some())
-        && let Err(error) = hardware::load_feetech_config(&args.servo_calibration)
-    {
-        tracing::error!(%error, "invalid Feetech calibration; no motor port was opened");
-        return ExitCode::FAILURE;
-    }
-
     if let Some(Command::Init { duration }) = args.command {
+        if let Some(port) = &args.port {
+            params.bus.port.clone_from(port);
+        }
         // init opens the motor bus itself. Keep ownership until the whole ramp returns,
         // so neither a daemon nor another init can join it partway through.
         let _instance_lock = match claim_lock(&args.socket) {
@@ -1369,7 +1371,7 @@ async fn main() -> ExitCode {
             }
         };
         duck_ipc_proto::log_startup_identity!("robotd");
-        return run_init(&params, duration, &args.servo_calibration);
+        return run_init(&params, duration, calibration);
     }
 
     // Own the endpoint before publishing an identity or starting a thread that can touch
@@ -1384,8 +1386,10 @@ async fn main() -> ExitCode {
     duck_ipc_proto::log_startup_identity!("robotd");
 
     let mut state = RobotState::new(&params, &params_path, args.unhealthy, args.busy);
-    state.servo_debug =
-        servo_debug::Hub::new(args.servo_calibration.clone(), args.fake, args.servo_debug);
+    state.servo_debug = servo_debug::Hub::new(calibration.to_owned(), args.fake, commissioning);
+    state.hardware.port_override = args.port.clone();
+    state.hardware.remote_sim = args.sim.is_some();
+    state.servo_debug.disconnect("waiting for motor bus");
     let vetbook_path = args.vetbook.clone().or_else(|| {
         (!args.fake && args.sim.is_none()).then(|| PathBuf::from(vetbook::DEFAULT_PATH))
     });
@@ -1402,7 +1406,7 @@ async fn main() -> ExitCode {
     let intents = Arc::new(Intents::new());
     // Where the duck on its own starts; `robot.autonomous` (an NFC tag, `robotctl autonomous`)
     // changes it until the next boot.
-    intents.set_autonomous(params.autonomous.enabled);
+    intents.set_autonomous(params.autonomous.enabled && !commissioning);
 
     start_head_imu(&state, &params, args.fake || args.sim.is_some());
 
@@ -1545,8 +1549,11 @@ fn spawn_control_thread(
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let period = params.period();
     let fake = args.fake;
+    let no_policy = args.no_policy;
+    let physical_profile = args.sim.is_none()
+        && (!fake || args.servo_calibration.is_some())
+        && params.bus.driver == params::ServoDriver::Feetech1910;
     let sim = args.sim.clone();
-    let bus = params.bus.clone();
     let params = params.clone();
     // So a reload can re-read `[policy]` without a restart. The path rather than the loaded
     // params, because the point is to pick up what has been written since.
@@ -1569,52 +1576,64 @@ fn spawn_control_thread(
                 }
             };
 
-            if fake {
-                tracing::warn!("--fake: no bus, no robot");
-                runtime.block_on(control_loop(
-                    FakeIo::at(DEFAULT_POSITION),
-                    state,
-                    intents,
-                    params,
-                    params_path,
-                    period,
-                    poweroff,
-                ));
-                return;
-            }
-
-            // No `open_bus_waiting` equivalent, deliberately: `RemoteIo` connects lazily and
-            // reconnects on every tick, so a duck started before its simulator simply reports
-            // unhealthy until the simulator answers — which is what a robot with no power on the
-            // bus does too, by a different route.
-            if let Some(addr) = sim {
-                tracing::warn!(%addr, "--sim: the body is in MuJoCo");
-                runtime.block_on(control_loop(
-                    duck_control::sim::RemoteIo::at(addr),
-                    state,
-                    intents,
-                    params,
-                    params_path,
-                    period,
-                    poweroff,
-                ));
-                return;
-            }
-
-            // Waiting, not one shot. `open_bus` verifies motor registers, which means it
-            // talks to the servos — so on an unpowered board it fails and this used to fall
-            // straight off the end of the thread. No control loop was ever created, and
-            // because nothing had been *attempted* the health reason was the bland "control
-            // loop has not completed a cycle yet", forever, whatever happened to the robot
-            // afterwards. Retrying the read alone was not enough: execution never got there.
             runtime.block_on(async move {
-                // The voice works while the bus does not: a robot waiting on unplugged servos
-                // still quacks. Stopped before the loop starts, which then owns the speaker.
-                let waiting_voice = WaitingVoice::start(&params, Arc::clone(&intents));
-                let io = open_bus_waiting(&bus, &state).await;
-                drop(waiting_voice);
-                if let Some(io) = io {
-                    control_loop(io, state, intents, params, params_path, period, poweroff).await;
+                let mut params = params;
+                let mut control = ControlRuntime::new(params_path, period, poweroff);
+                control.no_policy = no_policy;
+                while !state.shutdown.load(Ordering::Relaxed) {
+                    // No IO handle escapes a cycle. Only after the previous owner returns
+                    // (and drops its tty) can the next settings open a new connection.
+                    state.servo_debug.reopen.store(false, Ordering::Release);
+                    state.hardware.apply(&mut params);
+                    // An operator can also repair or replace the profile on disk. A previously
+                    // valid connection must fall back to commissioning if the next one cannot
+                    // use it. Only Finish may clear a commissioning session already in progress.
+                    if physical_profile
+                        && hardware::load_feetech_config(&state.servo_debug.path).is_err()
+                    {
+                        state.servo_debug.bootstrap.store(true, Ordering::Release);
+                    }
+                    state.servo_debug.start_io_session();
+                    state.hardware.publish("waiting", None);
+                    state.consecutive_errors.store(0, Ordering::Relaxed);
+                    let run_params = params.clone();
+                    if fake {
+                        run_io_session(
+                            FakeIo::at(DEFAULT_POSITION),
+                            state.clone(),
+                            intents.clone(),
+                            run_params,
+                            &mut control,
+                        )
+                        .await;
+                    } else if let Some(addr) = sim.as_ref() {
+                        run_io_session(
+                            duck_control::sim::RemoteIo::at(addr.clone()),
+                            state.clone(),
+                            intents.clone(),
+                            run_params,
+                            &mut control,
+                        )
+                        .await;
+                    } else {
+                        let waiting_voice = WaitingVoice::start(&params, Arc::clone(&intents));
+                        let io = open_bus_waiting(&params.bus, &state).await;
+                        drop(waiting_voice);
+                        if let Some(io) = io {
+                            run_io_session(
+                                io,
+                                state.clone(),
+                                intents.clone(),
+                                run_params,
+                                &mut control,
+                            )
+                            .await;
+                        }
+                    }
+                    if !state.servo_debug.reopen.load(Ordering::Acquire) {
+                        break;
+                    }
+                    clear_motion(&intents, &state);
                 }
             });
         })
@@ -1740,19 +1759,33 @@ fn take_census<T: RobotIo>(safety: &mut duck_control::safety::Safety<T>, state: 
 /// Returns `None` only if shutdown is requested while waiting.
 async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo> {
     let mut attempt = 0u32;
-    #[cfg(target_os = "linux")]
-    if state.servo_debug.bootstrap {
-        while !state.shutdown.load(Ordering::Relaxed) {
-            match duck_control::feetech1910::debug::CommissioningIo::open(&bus.port) {
-                Ok(io) => return Some(BusIo::Commissioning(Box::new(io))),
-                Err(e) => tracing::warn!(error=%e, "waiting for commissioning serial port"),
+    while !state.shutdown.load(Ordering::Relaxed)
+        && !state.servo_debug.reopen.load(Ordering::Acquire)
+    {
+        #[cfg(target_os = "linux")]
+        if bus.driver == params::ServoDriver::Feetech1910 {
+            let opened = if state.servo_debug.bootstrap.load(Ordering::Acquire) {
+                duck_control::feetech1910::debug::CommissioningIo::open(&bus.port)
+                    .map(|io| BusIo::Commissioning(Box::new(io)))
+            } else {
+                BusIo::open_feetech(&bus.port, &state.servo_debug.path)
+            };
+            match opened {
+                Ok(io) => return Some(io),
+                Err(error) => {
+                    attempt = attempt.saturating_add(1);
+                    state.startup_bus_failures.store(attempt, Ordering::Relaxed);
+                    state
+                        .hardware
+                        .publish("error", Some(format!("{}: {error}", bus.port)));
+                    if attempt == 1 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY) {
+                        tracing::warn!(port = %bus.port, %error, "waiting for Feetech bus");
+                    }
+                    tokio::time::sleep(STARTUP_RETRY_INTERVAL).await;
+                    continue;
+                }
             }
-            tokio::time::sleep(STARTUP_RETRY_INTERVAL).await;
         }
-        return None;
-    }
-
-    while !state.shutdown.load(Ordering::Relaxed) {
         // Logging lives in `open_bus`, which is chatty by design on the first attempt and
         // quiet thereafter — a board waiting overnight must not fill the journal.
         let mut missing = Vec::new();
@@ -1792,10 +1825,10 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
         state.imu_missing.store(imu_missing, Ordering::Relaxed);
         state.startup_bus_failures.store(attempt, Ordering::Relaxed);
 
-        // Nothing to retry on a platform that has no bus at all.
-        if !cfg!(target_os = "linux") {
-            return None;
-        }
+        state.hardware.publish(
+            "error",
+            Some(format!("cannot open or verify motor bus {}", bus.port)),
+        );
         tokio::time::sleep(STARTUP_RETRY_INTERVAL).await;
     }
 
@@ -2170,9 +2203,18 @@ async fn adopt_startup_pose<T: RobotIo>(
     state: &RobotState,
     period: Duration,
 ) -> Option<[f64; NUM_JOINTS]> {
+    if state.servo_debug.bootstrap.load(Ordering::Acquire) {
+        // CommissioningIo deliberately has no normal read(): calibration may not exist yet.
+        // Reach the debug command loop instead of retrying that unsupported operation forever.
+        // This placeholder is never sent to motors: bootstrap skips all normal output, and
+        // debug hold/home establish their own targets from explicit commands and readback.
+        return (!state.shutdown.load(Ordering::Relaxed)).then_some(DEFAULT_POSITION);
+    }
     let mut attempt = 0u32;
 
-    while !state.shutdown.load(Ordering::Relaxed) {
+    while !state.shutdown.load(Ordering::Relaxed)
+        && !state.servo_debug.reopen.load(Ordering::Acquire)
+    {
         match safety.read() {
             Ok(sensors) => {
                 state.startup_bus_failures.store(0, Ordering::Relaxed);
@@ -2191,6 +2233,7 @@ async fn adopt_startup_pose<T: RobotIo>(
                 attempt += 1;
                 // Published before sleeping, so `robot.health` can name the cause on the
                 // very first failure rather than after the first log line.
+                state.hardware.publish("error", Some(e.to_string()));
                 state.startup_bus_failures.store(attempt, Ordering::Relaxed);
                 if attempt == 1 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY) {
                     tracing::warn!(
@@ -2335,6 +2378,8 @@ fn candidate_params(
     current: &params::PolicyParams,
     params_path: &std::path::Path,
     slot_errors: &mut SlotErrors,
+    active_driver: params::ServoDriver,
+    no_policy: bool,
 ) -> Option<params::PolicyParams> {
     let mut candidate = current.clone();
     match change {
@@ -2354,9 +2399,13 @@ fn candidate_params(
         // file's mode here would undo a live switch as a side effect of adding a skill.
         intents::PolicyChange::Reload => match params::Params::load(params_path, false) {
             Ok(fresh) => {
-                let mode = candidate.mode;
                 candidate = fresh.policy;
-                candidate.mode = mode;
+                candidate.mode = current.mode;
+                if fresh.bus.driver != active_driver {
+                    // The saved gain belongs to the protocol selected for the next restart.
+                    candidate.gain = current.gain;
+                }
+                candidate.enabled &= !no_policy;
                 // A file may name a skill this board cannot load; the same check startup runs
                 // drops it and reports degraded rather than failing.
                 drop_unloadable_overrides(&mut candidate, slot_errors);
@@ -2518,24 +2567,254 @@ fn build_controller(
     }
 }
 
+fn clear_motion(intents: &Intents, state: &RobotState) {
+    intents.set_enabled(false);
+    intents.set_twist_from([0.; 3], None);
+    intents.set_head([0.; 4]);
+    intents.set_pose(intents::PoseIntent::default());
+    intents.set_mouth(0.);
+    intents.set_autonomous(false);
+    intents.set_soccer(false, false);
+    let _ = intents.take_theremin_request();
+    let _ = intents.take_chorale_request();
+    let _ = intents.take_laser_request();
+    let _ = intents.take_power_request();
+    let _ = intents.take_reboot_motors();
+    let _ = intents.take_rest();
+    let _ = intents.take_shutdown();
+    let _ = intents.take_mode_switch();
+    let _ = intents.take_skills();
+    let _ = intents.take_policy_change();
+    let _ = intents.take_emotion();
+    state.moving.store(false, Ordering::Relaxed);
+    state.homed.store(false, Ordering::Relaxed);
+    state.sitting.store(false, Ordering::Relaxed);
+}
+
+async fn confirm_unloaded<T: RobotIo>(safety: &mut Safety<T>, state: &RobotState) -> bool {
+    loop {
+        let result = if state.servo_driver == params::ServoDriver::Feetech1910
+            && !state.hardware.remote_sim
+        {
+            safety
+                .servo_debug(&duck_control::servo_debug::DeviceOp::Torque {
+                    id: None,
+                    on: false,
+                })
+                .map(|_| ())
+        } else {
+            safety.set_torque(false)
+        };
+        match result {
+            Ok(()) => return true,
+            Err(error) => state.hardware.publish(
+                "unload_failed",
+                Some(format!("cannot confirm torque off: {error}")),
+            ),
+        }
+        if state.shutdown.load(Ordering::Relaxed) {
+            return false;
+        }
+        tokio::time::sleep(STARTUP_RETRY_INTERVAL).await;
+    }
+}
+
+/// Motor connections have a shorter lifetime than media readers and the active policy selections.
+struct ControlRuntime {
+    params_path: PathBuf,
+    period: Duration,
+    poweroff: PowerOff,
+    no_policy: bool,
+    background: Option<Background>,
+    policy: Option<(params::PolicyParams, SlotErrors)>,
+}
+impl ControlRuntime {
+    fn new(params_path: PathBuf, period: Duration, poweroff: PowerOff) -> Self {
+        Self {
+            params_path,
+            period,
+            poweroff,
+            no_policy: false,
+            background: None,
+            policy: None,
+        }
+    }
+}
+
+struct Background {
+    voice: Option<sound::Sound>,
+    pet: Option<pet_detect::worker::PetHandle>,
+    hearing: proto::HearingState,
+    theremin: Option<theremin::Theremin>,
+    laser: laser::Laser,
+    soccer: soccer::Soccer,
+}
+impl Background {
+    fn new(params: &Params, params_path: &Path) -> Self {
+        // The voice, and the ear. Both optional equipment: a robot without a codec or a bank
+        // walks identically — the player degrades to a debug line, and the mic worker is only
+        // spawned when configured, with its own retry loop when arecord flaps.
+        //
+        // A configured card this board lacks means ALSA's `default` instead (resolve_devices).
+        let cards = robotd_params::alsa_card_ids(
+            &std::fs::read_to_string("/proc/asound/cards").unwrap_or_default(),
+        );
+        let audio = params.audio.resolve_devices(&cards);
+        // The speaker level, over whatever the board left (`aic3104-init.service` runs before this unit
+        // and sets the HAT codec's full level). On the configured card, or the board's own codec where
+        // it fell back to `default` — the face board's RK809 (`SpeakerCodec`).
+        if params.audio.enabled
+            && let Some(mixer) = params.audio.speaker_mixer(&cards)
+        {
+            match robotd_params::set_speaker_volume(&mixer, params.audio.volume) {
+                Ok(()) => tracing::info!(
+                    volume = params.audio.volume,
+                    card = %mixer.card,
+                    "speaker level set"
+                ),
+                Err(e) => tracing::warn!(error = %e, "could not set the speaker level"),
+            }
+        }
+        if params.audio.enabled
+            && let Some(card) = &audio.missing_card
+        {
+            tracing::info!(
+                configured = %params.audio.device,
+                missing = %card,
+                "no such sound card; playing and recording on ALSA's default"
+            );
+        }
+        let voice = params
+            .audio
+            .enabled
+            .then(|| sound::Sound::new(params.audio.bank.clone(), audio.playback.clone()));
+        let pet: Option<pet_detect::worker::PetHandle> = if params.audio.enabled
+            && params.audio.pet_detect_resolved(params.policy.mode)
+            && let Some(model) = params.audio.pet_model_resolved()
+            && model.exists()
+        {
+            match pet_detect::worker::PetHandle::spawn(pet_detect::worker::PetConfig {
+                alsa_device: audio.capture.clone(),
+                model_path: model.clone(),
+                enter_threshold: params.audio.pet_enter_threshold,
+                exit_threshold: params.audio.pet_exit_threshold,
+            }) {
+                Ok(handle) => {
+                    tracing::warn!(model = %model.display(), "petting detection listening");
+                    Some(handle)
+                }
+                Err(e) => {
+                    // Not unhealthy: the classifier is a feature, not the robot. A missing
+                    // model on a release that ships one is caught by the packaging tripwires.
+                    tracing::warn!(error = %e, "petting detection unavailable");
+                    None
+                }
+            }
+        } else {
+            // Configured on but nothing to run: a bench robotd, a board that predates the
+            // model, or audio off. Quietly so on purpose — the mic is optional equipment.
+            None
+        };
+
+        // The theremin. `[theremin] enabled` is off by default, so on most ducks this is `None`
+        // and nothing here subscribes to depth at all — `tofd` keeps its own counsel, and
+        // `robotctl monitor` is unaffected either way, since it subscribes to `tofd` itself.
+        //
+        // On a duck that has turned it on, the depth reader starts *now* and parks on `tofd`'s
+        // socket whether or not anyone ever asks for an instrument: one blocked read costs
+        // nothing, and connecting lazily would make the first arming window wait for a
+        // connection as well as for frames — a second of silence that reads as a broken feature.
+        // Also off when audio is off, since a theremin with no voice is a mouth opening for no
+        // reason.
+        // What the microphone heard, for `robot.state.hearing`: petting as a level, noises and voices
+        // as counters, so a subscriber that missed a frame still sees that something happened.
+        let hearing = proto::HearingState::default();
+        let theremin = (params.theremin.enabled && params.audio.enabled).then(|| {
+            theremin::Theremin::spawn(params.theremin.socket.clone(), params.theremin.hand())
+        });
+        // Laser tracking. The reader holds no connection to `mediad` while tracking is off, so on a
+        // duck that never switches it on this is one sleeping thread. `[laser]` is re-read by that
+        // thread while it is on — tuning it must not need a restart that drops the robot.
+        let laser = laser::Laser::spawn(params.laser.clone(), params_path.to_owned());
+        // Autonomous soccer, the laser's sibling: likewise one sleeping thread until it is switched
+        // on, and `[soccer]` re-read live while it is.
+        let soccer = soccer::Soccer::spawn(params.soccer.clone(), params_path.to_owned());
+        Self {
+            voice,
+            pet,
+            hearing,
+            theremin,
+            laser,
+            soccer,
+        }
+    }
+    fn pause(&mut self) {
+        self.laser.set_active(false);
+        self.soccer.set_autonomous(false);
+        if let Some(instrument) = self.theremin.as_mut() {
+            instrument.set_active(false);
+        }
+        if let Some(voice) = self.voice.as_mut() {
+            voice.stop_child();
+        }
+    }
+}
+
+#[cfg(test)]
 async fn control_loop<T: RobotIo>(
     io: T,
     state: Arc<RobotState>,
     intents: Arc<Intents>,
     params: Params,
-    // Where `[policy]` is re-read from on a reload, so adding a skill needs no restart.
     params_path: PathBuf,
     period: Duration,
     poweroff: PowerOff,
 ) {
+    let mut runtime = ControlRuntime::new(params_path, period, poweroff);
+    run_io_session(io, state, intents, params, &mut runtime).await;
+}
+
+async fn run_io_session<T: RobotIo>(
+    io: T,
+    state: Arc<RobotState>,
+    intents: Arc<Intents>,
+    params: Params,
+    runtime: &mut ControlRuntime,
+) {
+    let params_path = runtime.params_path.clone();
+    let period = runtime.period;
+    let poweroff = runtime.poweroff.clone();
+    if state.servo_debug.bootstrap.load(Ordering::Acquire) {
+        let mut safety = Safety::new(io, SafetyConfig::default());
+        let mut controller = servo_debug::Controller::new(&state.servo_debug);
+        state.hardware.publish("waiting", None); // A tty is open. A scan establishes whether servos answer.
+        state.servo_debug.connected();
+        let mut ticker = tokio::time::interval(period);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        while !state.shutdown.load(Ordering::Relaxed)
+            && !state.servo_debug.reopen.load(Ordering::Acquire)
+        {
+            ticker.tick().await;
+            if !state.servo_debug.reopen.load(Ordering::Acquire) {
+                controller.tick(&state.servo_debug, &mut safety, true);
+            }
+        }
+        if controller.may_hold() {
+            confirm_unloaded(&mut safety, &state).await;
+        }
+        return;
+    }
     // Owned rather than borrowed from `params`, because neither the mode nor the slots stay
     // what the file said: `robot.setMode` replaces the mode, `robot.loadPolicy` replaces one
     // slot, and the line below drops any override this board cannot actually load.
-    let mut policy_params = params.policy.clone();
-    // Slots running their default because an override would not load. Empty on nearly every
-    // robot; anything in it makes health degraded and shows up in `robot.policies`.
-    let mut slot_errors = SlotErrors::default();
-    drop_unloadable_overrides(&mut policy_params, &mut slot_errors);
+    let (mut policy_params, mut slot_errors) = runtime.policy.clone().unwrap_or_else(|| {
+        let mut policy = params.policy.clone();
+        let mut errors = SlotErrors::default();
+        drop_unloadable_overrides(&mut policy, &mut errors);
+        (policy, errors)
+    });
+    policy_params.gain = params.policy.gain;
+    policy_params.enabled &= params.policy.enabled;
     // `mut` because a mode switch replaces it: the resolved policy *is* the mode, once the
     // per-mode defaults have been applied.
     let mut policy_cfg = policy_params.resolved();
@@ -2563,6 +2842,17 @@ async fn control_loop<T: RobotIo>(
         return;
     };
 
+    let reopened = state.servo_debug.interlocked.load(Ordering::Acquire);
+    if reopened {
+        clear_motion(&intents, &state);
+        // On a new port the servos can already have torque on from another process.
+        // Verify torque off before admitting any normal command or reporting ready.
+        if !confirm_unloaded(&mut safety, &state).await {
+            return;
+        }
+    }
+    state.hardware.publish("ready", None);
+    state.servo_debug.connected();
     // A robot powered on sitting comes up the same way as one whose torque was cut: the first
     // Start ramps it slowly to the home pose and holds, the second hands it to the policy. It
     // used to rise through the sitstand network instead, which made the first Start a torque-on
@@ -2717,98 +3007,26 @@ async fn control_loop<T: RobotIo>(
     let mut standup_parked: Option<Parked> = None;
     let standup_resume = Duration::from_millis(params.safety.limp_fall_standup_resume_ms);
 
-    // The voice, and the ear. Both optional equipment: a robot without a codec or a bank
-    // walks identically — the player degrades to a debug line, and the mic worker is only
-    // spawned when configured, with its own retry loop when arecord flaps.
-    //
-    // A configured card this board lacks means ALSA's `default` instead (resolve_devices).
-    let cards = robotd_params::alsa_card_ids(
-        &std::fs::read_to_string("/proc/asound/cards").unwrap_or_default(),
-    );
-    let audio = params.audio.resolve_devices(&cards);
-    // The speaker level, over whatever the board left (`aic3104-init.service` runs before this unit
-    // and sets the HAT codec's full level). On the configured card, or the board's own codec where
-    // it fell back to `default` — the face board's RK809 (`SpeakerCodec`).
-    if params.audio.enabled
-        && let Some(mixer) = params.audio.speaker_mixer(&cards)
-    {
-        match robotd_params::set_speaker_volume(&mixer, params.audio.volume) {
-            Ok(()) => tracing::info!(
-                volume = params.audio.volume,
-                card = %mixer.card,
-                "speaker level set"
-            ),
-            Err(e) => tracing::warn!(error = %e, "could not set the speaker level"),
-        }
-    }
-    if params.audio.enabled
-        && let Some(card) = &audio.missing_card
-    {
-        tracing::info!(
-            configured = %params.audio.device,
-            missing = %card,
-            "no such sound card; playing and recording on ALSA's default"
-        );
-    }
-    let mut voice = params
-        .audio
-        .enabled
-        .then(|| sound::Sound::new(params.audio.bank.clone(), audio.playback.clone()));
-    let pet: Option<pet_detect::worker::PetHandle> = if params.audio.enabled
-        && params.audio.pet_detect_resolved(params.policy.mode)
-        && let Some(model) = params.audio.pet_model_resolved()
-        && model.exists()
-    {
-        match pet_detect::worker::PetHandle::spawn(pet_detect::worker::PetConfig {
-            alsa_device: audio.capture.clone(),
-            model_path: model.clone(),
-            enter_threshold: params.audio.pet_enter_threshold,
-            exit_threshold: params.audio.pet_exit_threshold,
-        }) {
-            Ok(handle) => {
-                tracing::warn!(model = %model.display(), "petting detection listening");
-                Some(handle)
-            }
-            Err(e) => {
-                // Not unhealthy: the classifier is a feature, not the robot. A missing
-                // model on a release that ships one is caught by the packaging tripwires.
-                tracing::warn!(error = %e, "petting detection unavailable");
-                None
-            }
-        }
-    } else {
-        // Configured on but nothing to run: a bench robotd, a board that predates the
-        // model, or audio off. Quietly so on purpose — the mic is optional equipment.
-        None
-    };
-
     // Pick-up detection (`[pickup]`). Off by default, and then this is `None` and nothing in
     // the loop below loads, scores or pauses anything. A model that will not load is a
     // warning, not unhealthy: the classifier is a convenience, and the robot walks without it.
     let mut pickup_watch = pickup::Watch::build(&params.pickup);
 
-    // The theremin. `[theremin] enabled` is off by default, so on most ducks this is `None`
-    // and nothing here subscribes to depth at all — `tofd` keeps its own counsel, and
-    // `robotctl monitor` is unaffected either way, since it subscribes to `tofd` itself.
-    //
-    // On a duck that has turned it on, the depth reader starts *now* and parks on `tofd`'s
-    // socket whether or not anyone ever asks for an instrument: one blocked read costs
-    // nothing, and connecting lazily would make the first arming window wait for a
-    // connection as well as for frames — a second of silence that reads as a broken feature.
-    // Also off when audio is off, since a theremin with no voice is a mouth opening for no
-    // reason.
-    // What the microphone heard, for `robot.state.hearing`: petting as a level, noises and voices
-    // as counters, so a subscriber that missed a frame still sees that something happened.
-    let mut hearing = proto::HearingState::default();
-    let mut theremin = (params.theremin.enabled && params.audio.enabled)
-        .then(|| theremin::Theremin::spawn(params.theremin.socket.clone(), params.theremin.hand()));
-    // Laser tracking. The reader holds no connection to `mediad` while tracking is off, so on a
-    // duck that never switches it on this is one sleeping thread. `[laser]` is re-read by that
-    // thread while it is on — tuning it must not need a restart that drops the robot.
-    let mut laser = laser::Laser::spawn(params.laser.clone(), params_path.clone());
-    // Autonomous soccer, the laser's sibling: likewise one sleeping thread until it is switched
-    // on, and `[soccer]` re-read live while it is.
-    let mut soccer = soccer::Soccer::spawn(params.soccer.clone(), params_path.clone());
+    let first_audio_session = runtime.background.is_none();
+    let background = runtime
+        .background
+        .get_or_insert_with(|| Background::new(&params, &params_path));
+    if reopened {
+        background.pause();
+    }
+    let Background {
+        voice,
+        pet,
+        hearing,
+        theremin,
+        laser,
+        soccer,
+    } = background;
     // How far the beak is open for the chorale, slewed across ticks — see where it is written.
     let mut chorale_mouth = 0.0f64;
     // And how the head sways while singing, applied to the next tick's command.
@@ -2856,6 +3074,8 @@ async fn control_loop<T: RobotIo>(
     // with it.
     if let Some(voice) = voice.as_mut()
         && params.audio.greet
+        && first_audio_session
+        && !reopened
     {
         voice.play("greet", false);
     }
@@ -2876,35 +3096,23 @@ async fn control_loop<T: RobotIo>(
         ticker.tick().await;
         let tick_start = Instant::now();
 
+        if state.servo_debug.reopen.load(Ordering::Acquire) {
+            confirm_unloaded(&mut safety, &state).await;
+            break;
+        }
         let was_debug = state.servo_debug.active.load(Ordering::Relaxed);
         if debug_controller.tick(
             &state.servo_debug,
             &mut safety,
             !powered_off && shutdown_sit.is_none() && shutdown_rest.is_none(),
         ) {
-            intents.set_enabled(false);
-            intents.stop();
-            intents.set_head([0.; 4]);
-            intents.set_pose(intents::PoseIntent::default());
-            intents.set_mouth(0.);
-            intents.set_autonomous(false);
-            intents.set_soccer(false, false);
+            clear_motion(&intents, &state);
             laser.set_active(false);
             soccer.set_autonomous(false);
             playing = None;
             if let Some(instrument) = theremin.as_mut() {
                 instrument.set_active(false);
             }
-            let _ = intents.take_theremin_request();
-            let _ = intents.take_laser_request();
-            let _ = intents.take_power_request();
-            let _ = intents.take_reboot_motors();
-            let _ = intents.take_rest();
-            let _ = intents.take_shutdown();
-            let _ = intents.take_mode_switch();
-            let _ = intents.take_skills();
-            let _ = intents.take_policy_change();
-            let _ = intents.take_emotion();
             mode_change = None;
             pending_swap = None;
             twist_ema = [0.; 3];
@@ -2921,13 +3129,16 @@ async fn control_loop<T: RobotIo>(
             }
             continue;
         }
+        if state.servo_debug.reopen.load(Ordering::Acquire) {
+            continue;
+        }
         if was_debug {
             intents.set_enabled(false);
             intents.stop();
             let _ = intents.take_power_request();
             continue;
         }
-        if state.servo_debug.bootstrap {
+        if state.servo_debug.bootstrap.load(Ordering::Acquire) {
             continue;
         }
         let read_at = proto::clock::monotonic_ns();
@@ -3546,9 +3757,14 @@ async fn control_loop<T: RobotIo>(
                     change = describe_change(&change),
                     "policy change refused: the robot is shutting down"
                 );
-            } else if let Some(candidate) =
-                candidate_params(&change, &policy_params, &params_path, &mut slot_errors)
-            {
+            } else if let Some(candidate) = candidate_params(
+                &change,
+                &policy_params,
+                &params_path,
+                &mut slot_errors,
+                state.servo_driver,
+                runtime.no_policy,
+            ) {
                 let cfg = candidate.resolved();
                 // Only a network that stepped last tick counts as driving: a robot that is
                 // disabled, limp or mid-ramp has nothing running that a swap could interrupt.
@@ -4709,9 +4925,11 @@ async fn control_loop<T: RobotIo>(
         }
 
         last_targets = targets;
-        match safety.apply(targets, hold, gain) {
-            Ok(applied) => limits.extend(applied.limits),
-            Err(e) => tracing::warn!(error = %e, "bus write failed"),
+        if !reopened || bringup != Bringup::Limp {
+            match safety.apply(targets, hold, gain) {
+                Ok(applied) => limits.extend(applied.limits),
+                Err(e) => tracing::warn!(error = %e, "bus write failed"),
+            }
         }
 
         state.laser_on.store(laser.active(), Ordering::Relaxed);
@@ -4817,7 +5035,7 @@ async fn control_loop<T: RobotIo>(
                     &sensors.positions,
                 ))),
                 skeleton: mapping::skeleton_at(&sensors.positions),
-                hearing: pet.as_ref().map(|_| hearing),
+                hearing: pet.as_ref().map(|_| *hearing),
             });
         }
 
@@ -4874,7 +5092,8 @@ async fn control_loop<T: RobotIo>(
                     .is_none()
                     .then_some(duck_control::model::GOAL_PWM_MAX)
             };
-            if last_goal_pwm.is_none_or(|t| t.elapsed() >= GOAL_PWM_INTERVAL)
+            if (!reopened || bringup != Bringup::Limp)
+                && last_goal_pwm.is_none_or(|t| t.elapsed() >= GOAL_PWM_INTERVAL)
                 && let Some(pwm) = want
             {
                 last_goal_pwm = Some(Instant::now());
@@ -4925,6 +5144,10 @@ async fn control_loop<T: RobotIo>(
                 bus_drops_window = 0;
             }
         }
+    }
+    runtime.policy = Some((policy_params, slot_errors));
+    if let Some(background) = runtime.background.as_mut() {
+        background.pause();
     }
     // The last second's counting, waiting for the book this once: the loop has no deadline left.
     vettally.handoff(
@@ -5437,8 +5660,7 @@ async fn handle(
             }
             continue;
         }
-        if state.servo_debug.active.load(Ordering::Relaxed) && request.method.starts_with("robot.")
-        {
+        if state.servo_debug.blocks_motion() && request.method.starts_with("robot.") {
             let allowed = [
                 "robot.health",
                 "robot.policies",
@@ -5552,7 +5774,7 @@ async fn handle(
 /// client that sends `robot.move` with an `id` is not silently ignored — the spec permits
 /// either, and refusing one because of a framing choice would be a surprise.
 fn apply_intent(state: &RobotState, intents: &Intents, call: &proto::Call) -> bool {
-    if state.servo_debug.active.load(Ordering::Relaxed) {
+    if state.servo_debug.blocks_motion() {
         return false;
     }
     match call {
@@ -6216,28 +6438,6 @@ fn queue_skill(state: &RobotState, intents: &Intents, skill: &str) -> bool {
             },
         },
     }
-}
-
-fn hardware_report(state: &RobotState) -> Result<proto::HardwareResult, String> {
-    let configured = Params::load(&state.config_path, false)
-        .map_err(|e| e.to_string())?
-        .bus
-        .driver;
-    Ok(proto::HardwareResult {
-        active_driver: state.servo_driver.as_str().into(),
-        configured_driver: configured.as_str().into(),
-        restart_required: configured != state.servo_driver,
-    })
-}
-fn set_hardware(
-    state: &RobotState,
-    p: &proto::HardwareParams,
-) -> Result<proto::HardwareResult, String> {
-    if !matches!(p.servo_driver.as_str(), "xl330" | "feetech1910") {
-        return Err("servo_driver must be xl330 or feetech1910".into());
-    }
-    params::edit::set_key(&state.config_path, "bus.driver", &p.servo_driver)?;
-    hardware_report(state)
 }
 
 fn dispatch(
@@ -11188,6 +11388,42 @@ mod tests {
         .await
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_reopened_bus_clears_old_intents_and_publishes_without_position_writes() {
+        let mut params = Params::default();
+        params.bus.driver = params::ServoDriver::Xl330;
+        let state = Arc::new(RobotState::new(
+            &params,
+            Path::new("/test/robotd.toml"),
+            false,
+            false,
+        ));
+        state.servo_debug.interlocked.store(true, Ordering::Release);
+        let intents = Arc::new(Intents::new());
+        intents.request_init();
+        intents.set_enabled(true);
+        intents.set_twist([0.4, 0., 0.]);
+        let stopping = state.clone();
+        let stop = async move {
+            while stopping.ticks.load(Ordering::Relaxed) < 5 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            stopping.shutdown.store(true, Ordering::Relaxed);
+        };
+        let mut io = FakeIo::new();
+        tokio::join!(
+            control_loop_probe_with(&mut io, state, intents.clone(), Duration::from_millis(2)),
+            stop
+        );
+        assert!(!intents.enabled());
+        assert_eq!(intents.snapshot().command.twist, [0.; 3]);
+        assert_eq!(io.torque, Some(false));
+        assert_eq!(
+            io.writes, 0,
+            "a fresh init is required even if the last owner was driving"
+        );
+    }
+
     /// **A restart must not move the robot**, and that is the invariant the old "never touch torque"
     /// rule existed to protect. It is unchanged: the loop reads, publishes and holds, and asks for no
     /// torque at all until someone enables the policy.
@@ -12027,6 +12263,215 @@ mod tests {
 #[cfg(test)]
 mod hardware_config_tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn commissioning_reaches_debug_without_a_normal_startup_read() {
+        let params = Params::default();
+        let mut state = RobotState::new(&params, Path::new("/test/robotd.toml"), false, false);
+        state.servo_debug =
+            servo_debug::Hub::new(PathBuf::from("/test/calibration.json"), true, true);
+        let state = Arc::new(state);
+        let mut safety = Safety::new(
+            duck_control::io::FakeIo::new().failing_reads(u32::MAX),
+            SafetyConfig::default(),
+        );
+        let hold = tokio::time::timeout(
+            Duration::from_millis(20),
+            adopt_startup_pose(&mut safety, &state, Duration::from_millis(20)),
+        )
+        .await
+        .expect("commissioning must reach the debug command loop without normal read()")
+        .unwrap();
+        assert_eq!(hold, DEFAULT_POSITION);
+        assert_eq!(safety.gain(), None);
+        assert_eq!(state.startup_bus_failures.load(Ordering::Relaxed), 0);
+
+        let caller = Arc::clone(&state);
+        let request = tokio::spawn(async move {
+            caller
+                .servo_debug
+                .request(servo_debug::Request::Enter)
+                .await
+        });
+        tokio::task::yield_now().await;
+        let mut controller = servo_debug::Controller::new(&state.servo_debug);
+        assert!(controller.tick(&state.servo_debug, &mut safety, true));
+        assert!(request.await.unwrap().unwrap().active);
+        assert_eq!(
+            safety.gain(),
+            None,
+            "entry must not set normal control gains"
+        );
+    }
+
+    #[test]
+    fn commissioning_selection_uses_the_active_driver_body_and_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.json");
+        let params = Params::default();
+        let args = Args::parse_from(["robotd", "--servo-calibration", path.to_str().unwrap()]);
+        assert!(commissioning_required(&args, &params));
+        std::fs::write(&path, "bad json").unwrap();
+        assert!(commissioning_required(&args, &params));
+        let joints = duck_control::servo_debug::SimDevice::default().joints;
+        let profile = serde_json::json!({"joints":joints,"imu_mount":[1,0,0,0],"current_ma_per_unit":1.5,"speed_rad_s_per_unit":0.2,"notes":"retain"});
+        std::fs::write(&path, profile.to_string()).unwrap();
+        assert!(!commissioning_required(&args, &params));
+        assert!(!commissioning_required(
+            &Args::parse_from(["robotd", "--fake"]),
+            &params
+        ));
+        assert!(Args::try_parse_from(["robotd", "--servo-debug"]).is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn editing_an_unopenable_port_interrupts_retry_and_refuses_queued_debug() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("robotd.toml");
+        let params = Params::default();
+        let state = Arc::new(RobotState::new(&params, &path, false, false));
+        state.servo_debug.disconnect("waiting for motor bus");
+        let bus = params::Bus {
+            port: "/dev/no-such-microduck-tty".into(),
+            ..Default::default()
+        };
+        let waiter = state.clone();
+        let handle = tokio::spawn(async move { open_bus_waiting(&bus, &waiter).await.is_none() });
+        tokio::task::yield_now().await;
+        assert!(
+            state
+                .servo_debug
+                .request(servo_debug::Request::Enter)
+                .await
+                .is_err()
+        );
+        let edit = serde_json::from_value(
+            serde_json::json!({"servo_driver":"feetech1910","port":"/dev/ttyUSB77"}),
+        )
+        .unwrap();
+        set_hardware(&state, &edit).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), handle)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn hardware_edits_are_atomic_and_override_locks_only_the_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("robotd.toml");
+        std::fs::write(&path, "[bus]\nport = \"/dev/ttyS2\"\n").unwrap();
+        let params = Params::load(&path, true).unwrap();
+        let mut state = RobotState::new(&params, &path, false, false);
+        let edit = |value| serde_json::from_value::<proto::HardwareParams>(value).unwrap();
+        let change = serde_json::json!({"servo_driver":"feetech1910","port":"/dev/ttyUSB0","normal_p":110,"limp_p":15});
+        let mut invalid = change.clone();
+        invalid["limp_p"] = 255.into();
+        let before = std::fs::read(&path).unwrap();
+        assert!(set_hardware(&state, &edit(invalid)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        state.hardware.port_override = Some("/dev/ttyS1".into());
+        assert!(set_hardware(&state, &edit(change.clone())).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        state.hardware.port_override = None;
+        let report = set_hardware(&state, &edit(change)).unwrap();
+        assert_eq!(report.configured_port, "/dev/ttyUSB0");
+        assert_eq!(report.effective_port, "/dev/ttyS2");
+        let mut next = params.clone();
+        state.hardware.apply(&mut next);
+        assert_eq!(
+            hardware_report(&state).unwrap().effective_port,
+            "/dev/ttyUSB0"
+        );
+        assert_eq!((report.normal_p, report.limp_p), (110, 15));
+        assert_eq!(report.bus_status, "reconfiguring");
+        assert!(state.servo_debug.reopen.load(Ordering::Acquire));
+        let saved = Params::load(&path, true).unwrap();
+        assert_eq!((saved.policy.gain, saved.safety.gain_limp), (110, 15));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn repeated_bus_sessions_keep_readers_and_committed_drive_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("robotd.toml");
+        let mut params = Params::default();
+        params.policy.enabled = false;
+        params.audio.enabled = false;
+        let state = Arc::new(RobotState::new(&params, &path, false, false));
+        let intents = Arc::new(Intents::new());
+        let mut runtime = ControlRuntime::new(path, Duration::from_millis(2), Arc::new(|| {}));
+        intents.request_mode_switch(mode_code(Mode::Roller));
+        for cycle in 0..3 {
+            let before = state.ticks.load(Ordering::Relaxed);
+            state.servo_debug.reopen.store(false, Ordering::Release);
+            let until_reopen = async {
+                while state.ticks.load(Ordering::Relaxed) < before + 4 {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+                state.servo_debug.request_reopen();
+            };
+            tokio::join!(
+                run_io_session(
+                    FakeIo::new(),
+                    state.clone(),
+                    intents.clone(),
+                    params.clone(),
+                    &mut runtime
+                ),
+                until_reopen
+            );
+            let workers = runtime.background.as_mut().unwrap();
+            assert_eq!(
+                workers.hearing.noises, cycle,
+                "the daemon's readers and audio state must be retained"
+            );
+            workers.hearing.noises += 1;
+            assert_eq!(runtime.policy.as_ref().unwrap().0.mode, Mode::Roller);
+            assert_eq!(mode_of(state.mode.load(Ordering::Relaxed)), Mode::Roller);
+            assert!(!intents.enabled());
+        }
+    }
+    #[test]
+    fn pending_driver_saves_target_gains_without_reopening_with_the_old_protocol() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("robotd.toml");
+        let params = Params::default();
+        let state = RobotState::new(&params, &path, false, false);
+        let change = serde_json::from_value(
+            serde_json::json!({"servo_driver":"xl330","port":"/dev/ttyUSB7","normal_p":300}),
+        )
+        .unwrap();
+        let saved = set_hardware(&state, &change).unwrap();
+        assert!(saved.restart_required);
+        assert_eq!(saved.normal_p, 300);
+        assert_eq!(saved.configured_port, "/dev/ttyUSB7");
+        assert_eq!(saved.effective_port, params.bus.port);
+        assert!(!state.servo_debug.reopen.load(Ordering::Acquire));
+        let candidate = candidate_params(
+            &intents::PolicyChange::Reload,
+            &params.policy,
+            &path,
+            &mut SlotErrors::default(),
+            state.servo_driver,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            candidate.gain, params.policy.gain,
+            "a policy reload must not apply the next driver's gain to this bus"
+        );
+        assert!(
+            !candidate.enabled,
+            "explicit --no-policy survives policy reload"
+        );
+        let revert =
+            serde_json::from_value(serde_json::json!({"servo_driver":"feetech1910"})).unwrap();
+        assert!(
+            set_hardware(&state, &revert).is_err(),
+            "would make P=300 live on the Feetech bus"
+        );
+    }
     #[test]
     fn saves_driver_without_hot_switching_and_reloads_it_on_restart() {
         let dir = tempfile::tempdir().unwrap();
@@ -12038,6 +12483,7 @@ mod hardware_config_tests {
             &state,
             &proto::HardwareParams {
                 servo_driver: "xl330".into(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -12049,7 +12495,8 @@ mod hardware_config_tests {
             set_hardware(
                 &state,
                 &proto::HardwareParams {
-                    servo_driver: "pwm".into()
+                    servo_driver: "pwm".into(),
+                    ..Default::default()
                 }
             )
             .is_err()

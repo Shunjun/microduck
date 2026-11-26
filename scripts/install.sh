@@ -911,7 +911,7 @@ report() {
     if [ -n "$NO_START" ]; then
         warn "DUCK_NO_START was set: the release and its units are installed and NOTHING is
   enabled, now or at the next boot. This board is not a working robot until:
-    sudo systemctl enable --now updaterd robotd configd btd padd autod
+    sudo systemctl enable --now updaterd robotd configd btd padd studio autod
 
   REBOOT BEFORE MEASURING ANYTHING. The release's own hooks/postinstall enabled and started
   every daemon before this script could stop them, so they have run on this boot. A daemon does

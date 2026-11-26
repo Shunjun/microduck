@@ -28,35 +28,29 @@ pub fn app_with_library(socket: PathBuf, library: PathBuf) -> Router {
         library,
         library_lock: Mutex::new(()),
     });
-    let mut router = Router::new().route(
+    let router = Router::new().route(
         "/",
-        get(|| async { Html(include_str!("../web/index.html")) }),
+        get(|| async { Html(include_str!("../web-dist/index.html")) }),
     );
-    macro_rules! web {
-        ($name:literal,$mime:literal) => {
-            router = router.route(
-                concat!("/", $name),
-                get(|| async {
-                    asset($mime, include_bytes!(concat!("../web/", $name)).as_slice())
-                }),
-            );
-        };
-    }
-    web!("app.js", "text/javascript; charset=utf-8");
-    web!("ui.js", "text/javascript; charset=utf-8");
-    web!("state.js", "text/javascript; charset=utf-8");
-    web!("media.js", "text/javascript; charset=utf-8");
-    web!("control.js", "text/javascript; charset=utf-8");
-    web!("actions.js", "text/javascript; charset=utf-8");
-    web!("debug.js", "text/javascript; charset=utf-8");
-    web!("debug.html", "text/html; charset=utf-8");
-    web!("preview.js", "text/javascript; charset=utf-8");
-    web!("style.css", "text/css; charset=utf-8");
-    web!("control.css", "text/css; charset=utf-8");
-    web!("actions.css", "text/css; charset=utf-8");
-    web!("debug.css", "text/css; charset=utf-8");
-    web!("settings.css", "text/css; charset=utf-8");
     router
+        .route(
+            "/assets/studio.js",
+            get(|| async {
+                asset(
+                    "text/javascript; charset=utf-8",
+                    include_bytes!("../web-dist/assets/studio.js"),
+                )
+            }),
+        )
+        .route(
+            "/assets/studio.css",
+            get(|| async {
+                asset(
+                    "text/css; charset=utf-8",
+                    include_bytes!("../web-dist/assets/studio.css"),
+                )
+            }),
+        )
         .route(
             "/duck.bin",
             get(|| async {
@@ -138,6 +132,56 @@ async fn debug(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn serves_react_bundle_instead_of_legacy_dom_pages() {
+        use axum::{
+            body::{Body, to_bytes},
+            http::Request,
+        };
+        use tower::ServiceExt;
+        let app = app(PathBuf::from("/test/missing.sock"));
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let html = String::from_utf8(
+            to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("/assets/studio.js"));
+        assert!(!html.contains("/app.js"));
+        for (path, content_type) in [
+            ("/assets/studio.js", "text/javascript"),
+            ("/assets/studio.css", "text/css"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert!(
+                response.headers()["content-type"]
+                    .to_str()
+                    .unwrap()
+                    .starts_with(content_type)
+            );
+        }
+        let legacy = app
+            .oneshot(
+                Request::builder()
+                    .uri("/debug.html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy.status(), StatusCode::NOT_FOUND);
+    }
     #[test]
     fn checks_origins_and_required_mutation_header() {
         let mut h = HeaderMap::new();
@@ -161,7 +205,7 @@ mod tests {
         use tower::ServiceExt;
         let dir = tempfile::tempdir().unwrap();
         let app = app_with_library(dir.path().join("absent.sock"), dir.path().join("actions"));
-        for path in ["/", "/app.js", "/debug.html", "/settings.css", "/duck.bin"] {
+        for path in ["/", "/assets/studio.js", "/assets/studio.css", "/duck.bin"] {
             let response = app
                 .clone()
                 .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())

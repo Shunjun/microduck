@@ -293,6 +293,8 @@ rm -rf staged dist
 # (~30s here); with only the revision, which moves when you commit rather than when you push, an
 # unchanged tree rebuilds nothing at all. Nothing visible is lost — `robotctl version` reports
 # the revision and not the build time, and the version string carries the push's epoch.
+sh scripts/build-studio.sh
+
 if [ "$DOCKER" = no ]; then
     echo "==> building $VERSION for the board (zigbuild)"
     BIN="target/aarch64-unknown-linux-gnu/release"
@@ -386,6 +388,7 @@ cargo run -p xtask -- package \
     --include "scripts/rkaiq-modinfo-shim.c=scripts/rkaiq-modinfo-shim.c" \
     --include "scripts/setup-login.sh=scripts/setup-login.sh" \
     --include "scripts/setup-quiet-boot.sh=scripts/setup-quiet-boot.sh" \
+    --include "scripts/migrate-commissioning.py=scripts/migrate-commissioning.py" \
     --include "scripts/seed-policies.sh=scripts/seed-policies.sh" \
     --include "scripts/seed-detector.sh=scripts/seed-detector.sh" \
     --include "scripts/robot-rescue=scripts/robot-rescue" \

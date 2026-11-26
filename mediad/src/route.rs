@@ -399,6 +399,7 @@ mod tests {
             proto::Call::RobotHardware,
             proto::Call::RobotSetHardware(proto::HardwareParams {
                 servo_driver: "feetech1910".into(),
+                ..Default::default()
             }),
         ] {
             assert_eq!(route_for(&call), Route::Refused, "{}", call.method());

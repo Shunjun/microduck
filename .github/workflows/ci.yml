@@ -43,6 +43,21 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  studio-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: studio/frontend/package-lock.json
+      - run: sh scripts/build-studio.sh
+      - run: npm --prefix studio/frontend test
+      - name: Check embedded bundle is current
+        run: git diff --exit-code -- studio/web-dist
+      - run: python3 -m unittest discover -s scripts/tests -p test_migrate_commissioning.py
+
   check:
     runs-on: ubuntu-latest
     steps:
@@ -125,7 +140,7 @@ jobs:
       # a bashism would work on a dev box and fail on the board.
       - name: Lint the installer
         run: |
-          for script in scripts/install.sh scripts/setup-board.sh scripts/setup-gstreamer.sh scripts/setup-login.sh scripts/setup-quiet-boot.sh scripts/migrate-network.sh scripts/provision.sh scripts/provision-board.sh scripts/ci-release-notes.sh scripts/robot-rescue scripts/dev-push.sh scripts/pad-link-test.sh scripts/pad-stack-report.sh scripts/seed-policies.sh scripts/seed-detector.sh scripts/duck-sim scripts/install-duckctl.sh; do
+          for script in scripts/install.sh scripts/build-studio.sh scripts/setup-board.sh scripts/setup-gstreamer.sh scripts/setup-login.sh scripts/setup-quiet-boot.sh scripts/migrate-network.sh scripts/provision.sh scripts/provision-board.sh scripts/ci-release-notes.sh scripts/robot-rescue scripts/dev-push.sh scripts/pad-link-test.sh scripts/pad-stack-report.sh scripts/seed-policies.sh scripts/seed-detector.sh scripts/duck-sim scripts/install-duckctl.sh; do
             sh -n "$script"
             shellcheck --shell=sh "$script"
             # The one-liner is only correct if the file is executable and self-contained.
@@ -177,6 +192,12 @@ jobs:
           cargo run -p xtask -- package --version "$version" --bin-dir /tmp/bin --out /tmp/dist --zstd-level 1
           test -f /tmp/dist/manifest.json
           test -f "/tmp/dist/${version}.manifest.json"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: First-install commissioning against fake IO
+        run: node studio/tests/commissioning.mjs
 
   board:
     # The target is aarch64; this is the only job that proves the binaries run there.
