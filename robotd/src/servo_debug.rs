@@ -343,38 +343,36 @@ impl Controller {
         allow_enter: bool,
     ) -> bool {
         let pending = hub.queue.lock().unwrap().pop_front();
-        if let Some(pending) = pending {
-            if !pending.reply.is_closed() && Instant::now() < pending.until {
-                let finish = matches!(pending.request, Request::Finish);
-                let persist = matches!(
-                    pending.request,
-                    Request::Save
-                        | Request::SetZero { .. }
-                        | Request::Units { .. }
-                        | Request::ImuSave
-                );
-                let result = if !allow_enter && matches!(pending.request, Request::Enter) {
-                    Err("cannot enter debug during shutdown/rest".into())
-                } else {
-                    self.execute(&hub.path, io, pending.request)
-                };
-                if result.is_ok() && finish {
-                    hub.request_reopen();
-                    hub.bootstrap.store(false, Ordering::Release);
-                    self.status.calibration_required = false;
-                    self.status.calibration_error = None;
-                } else if persist && self.status.calibration_required {
-                    self.status.calibration_error = crate::hardware::validate_for_finish(&hub.path)
-                        .err()
-                        .map(|e| e.to_string());
-                }
-                if let Err(e) = &result {
-                    self.status.error = Some(e.clone());
-                }
-                hub.active.store(self.status.active, Ordering::Relaxed);
-                *hub.latest.lock().unwrap() = self.status.clone();
-                let _ = pending.reply.send(result.map(|_| self.status.clone()));
+        if let Some(pending) = pending
+            && !pending.reply.is_closed()
+            && Instant::now() < pending.until
+        {
+            let finish = matches!(pending.request, Request::Finish);
+            let persist = matches!(
+                pending.request,
+                Request::Save | Request::SetZero { .. } | Request::Units { .. } | Request::ImuSave
+            );
+            let result = if !allow_enter && matches!(pending.request, Request::Enter) {
+                Err("cannot enter debug during shutdown/rest".into())
+            } else {
+                self.execute(&hub.path, io, pending.request)
+            };
+            if result.is_ok() && finish {
+                hub.request_reopen();
+                hub.bootstrap.store(false, Ordering::Release);
+                self.status.calibration_required = false;
+                self.status.calibration_error = None;
+            } else if persist && self.status.calibration_required {
+                self.status.calibration_error = crate::hardware::validate_for_finish(&hub.path)
+                    .err()
+                    .map(|e| e.to_string());
             }
+            if let Err(e) = &result {
+                self.status.error = Some(e.clone());
+            }
+            hub.active.store(self.status.active, Ordering::Relaxed);
+            *hub.latest.lock().unwrap() = self.status.clone();
+            let _ = pending.reply.send(result.map(|_| self.status.clone()));
         }
         if self.status.active
             && self
