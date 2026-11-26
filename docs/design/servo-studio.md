@@ -5,24 +5,29 @@
 ## 文件边界
 
 - `studio/src/lib.rs`：嵌入网页资源、JSON 路由、请求大小与同源检查；`rpc.rs`：有超时和大小上限的本机 JSON-RPC 客户端。
-- `studio/web/app.js`：五页面路由与配置页；`state.js`：状态订阅、请求匹配、重连；`control.js`：摇杆与实时姿态；`actions.js`：模型导入、编辑及显式激活；`debug.js`/`debug.html`：保留的关节表与标定流程；`preview.js`：解析既有 duck.bin，按关节轴和父子结构绘制姿态；`style.css`：共享主题与框架；`control.css`/`actions.css`/`debug.css`/`settings.css`：对应页面样式。
+- `studio/frontend`：React/TypeScript 网页，五页面路由、配置与首次标定引导。使用实际 shadcn/ui 组件和 Tailwind；全局 CSS 仅维护共享主题及基础样式。WebGL 与媒体引擎负责网格姿态绘制及 WebRTC 信令，页面由 React 管理生命周期。
+- `studio/web-dist`：前端构建产物，由 Rust 嵌入；发布/开发打包先构建前端，设备无 Node 依赖。旧 DOM 页面不再提供 HTTP 路由。
 - `robotd/src/servo_debug.rs`：有界命令队列、执行回执、保持/柔顺/归位、稳定采样、配置备份与原子保存。所有串口操作均在原控制线程执行。
 - `duck-control/src/servo_debug.rs`：受限操作与反馈结构、零位计算、静态 IMU 水平校正和显式模拟设备。
 - `duck-control/src/feetech1910/debug.rs`：复用现有 FT 传输，逐颗报告舵机异常；调试读数不依赖 IMU。调试启动后端拒绝普通运动接口。
 
 ## IPC 和控制状态
 
-协议版本 69 新增 `robot.servoDebug`，参数为含 `op` 的对象。操作：`status`、`enter`、`exit`、`scan`、`mode`（off/hold/follow + p）、`position`（id/ticks）、`gain`（id/p）、`torque`（id/on，网页提供卸力）、`settings`（原顺序 15 个关节）、`home`、`capture`、`save`、`imu_capture`（可选已确认安装 mount）、`imu_save`。参数在 robotd 用严格类型验证。
+协议版本 69 新增 `robot.servoDebug`，参数为含 `op` 的对象。操作：`status`、`enter`、`exit`、`scan`、`mode`（off/hold/follow + p）、`position`（id/ticks）、`gain`（id/p）、`torque`（id/on，网页提供卸力）、`settings`（原顺序 15 个关节）、`home`、`capture`、`save`、`units`（显式速度/电流单位）、`finish`（校验并结束装机）、`set_zero`（id/ticks，单关节软件零位持久化）、`imu_capture`（可选已确认安装 mount）、`imu_save`。参数在 robotd 用严格类型验证。
 
 status 即时读取最近快照，其余命令进入容量 8 的队列。控制线程执行后才回应；过期或调用方已取消的命令不执行。请求等待 9 秒，内部队列期限 8 秒。目标移动的完成通过 moving 和反馈判断，不把“收到请求”报告成“舵机已到位”。
 
 进入后普通策略及意图不能控制舵机。固定/柔顺保持建立当前位置目标后再改变 P 和使能。退出明确卸力，正常策略须重新启用；正在关机收姿时不允许进入。一次断连或卸力失败不应继续追踪旧目标；卸力对仍可响应的设备尽力执行，并逐项报告无法确认的设备。
 
-`--servo-debug` 是 robotd 的装机启动方式：共享原实例锁，没有完整标定和 IMU 仍可启动，只能通过调试接口操作。正常方式则保留完整运动参数校验。
+缺少或无效飞特标定时，普通 robotd 自动进入装机状态，保持原实例锁和唯一串口所有权，不创建正常运动输出。移除额外的 `--servo-debug` 开关。标定未完成、总线等待连接或正在重连时，配置和最近状态仍可查询；不可执行的调试请求明确报错，不让用户只能等待队列超时。网页初次连接检测 `calibration_required` 后进入引导：选择硬件/串口、只读检查、确认方向与机械限位、摆标准姿态采集保存、独立身体 IMU 标定、核对必要单位、明确完成。进度以设备当前数据为准。
+
+装机过程保存的 JSON 带有 `commissioning_pending: true`，因此即使参数已填齐，未明确完成时重启仍停留在引导。`finish` 要求已保存的完整配置通过运动后端校验，且没有未保存的姿态、关节或 IMU 候选。执行并确认卸力后移除待完成标记，再请求控制线程重新打开正常 IO，清除运动意图；完成不自动使能。配置文件中的速度/电流单位和 IMU 安装前向不填造默认值，缺失时显示阻塞原因。端口变更、CLI 覆盖及有效/已保存参数的规则由 [飞特硬件说明](feetech-hardware.md) 负责。
 
 ## 标定
 
-调零页的 3D 姿态固定为 DEFAULT_POSITION，调试页才跟随实测关节角。零位公式沿用 [飞特驱动](feetech-hardware.md)，姿态图和保存的数学定义一致。必须有真实稳定采样、明确方向及机械限位；未接/失效关节不允许整机标定。保存保留原配置其他字段，备份后原子替换。
+“将当前姿态设为零位”保留一键采集并保存：确认后依次执行 capture/save，采集失败不写入。调零页的 3D 姿态固定为 DEFAULT_POSITION，调试页才跟随实测关节角。零位公式沿用 [飞特驱动](feetech-hardware.md)，姿态图和保存的数学定义一致。必须有真实稳定采样、明确方向及机械限位；未接/失效关节不允许整机标定。保存保留原配置其他字段，备份后原子替换。
+
+摆姿标定保存后，选中关节可在卸力状态下输入编码器零位并单独保存（`set_zero`）。服务端读取已保存配置，只更新该 ID 的 `zero_ticks`，其他关节、IMU 和未知字段保持原样；未保存的其他关节会话设置不会顺带落盘。选中关节的方向、限位须与已保存配置一致；同时校验零位和标准姿态目标的编码器范围及机械限位。保存先更新会话配置，写文件失败则恢复会话；成功时清除旧采集候选和目标，不发送位置/力矩命令。沿用原子保存与备份，回归零位使用更新后的偏移。部署须同时更新 robotd 和 Studio（API 71）。
 
 模型采用与 robotctl 相同的 `DUCK` 格式和关节顺序，但资源独立为 `studio/assets/duck.bin`。它从 `microduck_rl/src/mjlab_microduck/robot/microduck/robot_walk.xml` 及其原始 STL 生成，只合并坐标完全相同的顶点，不移动顶点、删减三角面或重新排列面绕序，也不沿用终端模型对内部零件的省略。终端的 `robotctl/assets/duck.bin` 继续保留低模；网页不能使用该资源代替完整 CAD。
 
@@ -44,7 +49,7 @@ python3 scripts/bake-duck-mesh.py \
 
 ## 默认网页服务
 
-正式发布、开发发布、本地 dev-push 三条路径均打包 `bin/studio`、`systemd/studio.service` 和 `systemd/sysusers.d/studio.conf`。服务默认监听 8080，由安装钩子和安装脚本启用，更新器从随包服务文件自动推导重启列表。Studio 没有独立硬件权限，也不自动进入舵机调试模式。
+正式发布、开发发布、本地 dev-push 三条路径均打包 `bin/studio`、`systemd/studio.service` 和 `systemd/sysusers.d/studio.conf`。服务默认监听 8080，由安装钩子和安装脚本启用，更新器从随包服务文件自动推导重启列表。Studio 没有独立硬件权限；缺少标定时显示引导，由 robotd 的装机状态限制普通控制。
 
 mediad 的 unit 改放在 `optional-systemd/`，避免自动启用或在每次升级时重新启动。安装钩子在启动 Studio 前停用旧机器已有的 mediad。音视频、WebRTC 和旧网页仍在 mediad 中，未迁移到 Studio。该变更只调整仓库发布配置，不自动操作已连接的开发板。
 
@@ -65,6 +70,6 @@ mediad 的 unit 改放在 `optional-systemd/`，避免自动启用或在每次�
 
 HTTP API：`GET /api/actions` 列表；`POST /api/actions` 原子导入；`PUT /api/actions/{sha256}/manifest` 校验、备份并保存说明。导入 body 为 4 字节大端 JSON 长度、UTF-8 manifest、ONNX 三段，浏览器直接传 Blob，避免模型 Base64 膨胀。manifest 上限 64 KiB、ONNX 上限 32 MiB；不接收客户端路径。存储键为模型 SHA-256，同模型重复导入拒绝并提示编辑已有说明。先写暂存目录、调用既有 `duck_control::policy::validate` 验证 ONNX 接口，成功后原子发布；失败清理暂存，不生成已安装项。设备需要既有 ONNX Runtime；缺失时报告原因，不能跳过模型检查。
 
-导入/保存不启用任何动作。单次动作须显式经 `robot.setSkill` 注册，之后才可确认试运行；持续策略须显式绑定 `robot.loadPolicy`。运行端现有动作来自 `robot.skills`，不在网页写死列表。移除自定义配置经 `robot.removeSkill`，原版动作恢复默认、模型文件保留。修改 manifest 不修改已注册配置或运行中的策略，需重新注册/绑定。预览插画只是动作图标，不是由模型推演出的动作；3D 只展示实测状态。
+导入/保存不启用任何动作。单次动作须显式经 `robot.setSkill` 注册，之后才可确认试运行；持续策略须显式绑定 `robot.loadPolicy`。`robot.skills` 是可编辑的配置记录；操控页结合 `robot.policies` 的启用状态与动作名以及实时健康反馈显示快捷动作，不把关闭策略时的默认配置当作可执行动作。列表不在网页写死。移除自定义配置经 `robot.removeSkill`，原版动作恢复默认、模型文件保留。修改 manifest 不修改已注册配置或运行中的策略，需重新注册/绑定。预览插画只是动作图标，不是由模型推演出的动作；3D 只展示实测状态。
 
-硬件选项通过 robotd 的 API 和配置文件管理，机制归 [飞特硬件说明](feetech-hardware.md)；本次协议版本 70，部署须同时更新 robotd 与 Studio。方向与限位在配置页编辑，按原契约先应用会话，采集保存零位时写入设备配置。操控偏好仅保存于当前浏览器并明确标注，不冒充 robotd 的持久化参数。
+硬件选项通过 robotd 的 API 和配置文件管理，机制归 [飞特硬件说明](feetech-hardware.md)；当前协议版本 72，部署须同时更新 robotd 与 Studio。方向与限位在配置页编辑，按原契约先应用会话，采集保存零位时写入设备配置。操控偏好仅保存于当前浏览器并明确标注，不冒充 robotd 的持久化参数。

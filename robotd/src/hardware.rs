@@ -32,14 +32,72 @@ impl MotorDriver {
     }
 }
 
-pub fn load_feetech_config(path: &Path) -> Result<FeetechConfig> {
-    let raw = std::fs::read(path).map_err(|error| {
+/// The operator's file may also carry annotations. Decode the control fields strictly while
+/// leaving those annotations in the persisted document across calibration edits.
+pub fn calibration_fields(path: &Path) -> Result<serde_json::Value> {
+    let raw = std::fs::read(path)
+        .map_err(|e| IoError::Bus(format!("read Feetech calibration {}: {e}", path.display())))?;
+    let mut value: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| {
         IoError::Bus(format!(
-            "read Feetech calibration {}: {error}; no XL330 calibration is substituted",
+            "invalid Feetech calibration {}: {e}",
             path.display()
         ))
     })?;
-    let config: FeetechConfig = serde_json::from_slice(&raw).map_err(|error| {
+    //Compatible: operator annotations in existing profiles are not motion parameters.
+    if let Some(object) = value.as_object_mut() {
+        object.retain(|key, _| {
+            matches!(
+                key.as_str(),
+                "commissioning_pending"
+                    | "joints"
+                    | "imu_mount"
+                    | "speed_rad_s_per_unit"
+                    | "current_ma_per_unit"
+            )
+        });
+        if let Some(joints) = object
+            .get_mut("joints")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for joint in joints {
+                if let Some(row) = joint.as_object_mut() {
+                    row.retain(|key, v| {
+                        !v.is_null()
+                            && matches!(
+                                key.as_str(),
+                                "id" | "zero_ticks" | "direction" | "min_ticks" | "max_ticks"
+                            )
+                    });
+                }
+            }
+        }
+    }
+    Ok(value)
+}
+
+pub fn load_feetech_config(path: &Path) -> Result<FeetechConfig> {
+    let fields = calibration_fields(path)?;
+    //Compatible: a complete profile from before the wizard has no pending marker.
+    if fields
+        .get("commissioning_pending")
+        .is_some_and(|value| value != &serde_json::Value::Bool(false))
+    {
+        return Err(IoError::Bus(
+            "commissioning is unfinished; use Finish after verifying the saved profile".into(),
+        ));
+    }
+    validate_fields(path, fields)
+}
+
+pub fn validate_for_finish(path: &Path) -> Result<FeetechConfig> {
+    validate_fields(path, calibration_fields(path)?)
+}
+
+fn validate_fields(path: &Path, mut fields: serde_json::Value) -> Result<FeetechConfig> {
+    if let Some(doc) = fields.as_object_mut() {
+        doc.remove("commissioning_pending");
+    }
+    let config: FeetechConfig = serde_json::from_value(fields).map_err(|error| {
         IoError::Bus(format!(
             "invalid Feetech calibration {}: {error}",
             path.display()
@@ -51,6 +109,9 @@ pub fn load_feetech_config(path: &Path) -> Result<FeetechConfig> {
         return Err(IoError::Bus(format!(
             "Feetech joint IDs/order must match the shared joint table {JOINT_IDS:?}; got {ids:?}"
         )));
+    }
+    for (joint, angle) in config.joints.iter().zip(duck_control::DEFAULT_POSITION) {
+        joint.target_ticks(angle)?;
     }
     Ok(config)
 }
@@ -85,7 +146,7 @@ impl BusIo {
         match self {
             Self::Xl330(io) => io.interpolate_to(target, duration, step),
             Self::Commissioning(_) => Err(IoError::Bus(
-                "restart robotd normally after calibration".into(),
+                "finish commissioning before requesting normal motion".into(),
             )),
             Self::Feetech1910(io) => {
                 if step.is_zero() {

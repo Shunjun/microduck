@@ -1,6 +1,6 @@
 import {strict as assert} from 'node:assert';
 import {readFile} from 'node:fs/promises';
-const source=await readFile(new URL('../web/media.js',import.meta.url),'utf8');
+const source=await readFile(new URL('../frontend/src/lib/media.js',import.meta.url),'utf8');
 const {connectMedia}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 class Socket {
   static OPEN=1;

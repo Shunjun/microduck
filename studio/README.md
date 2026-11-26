@@ -6,7 +6,7 @@
 
 采用伙伴版 UI：操控、动作库、自主行动入口、硬件调试、配置。摇杆、实测姿态、已有动作和硬件选择连接 robotd；自主行动尚未实现；摄像头通过既有 mediad 的局域网 WebRTC 接入，需要媒体服务运行，连接地址在配置页设置。模型导入同时选择 `.onnx` 和 `manifest.json`，可在页面内编辑说明，校验通过后只入库，注册/绑定与试运行均需显式操作。完整 API、存储、权限与限制见[设计说明](../docs/design/servo-studio.md)。
 
-硬件驱动在「配置 → 硬件」选择 `xl330` 或 `feetech1910`，保存到 robotd 的 `[bus].driver`，重启 robotd 后统一生效。网页会区分当前运行和已保存选项。此变更要求同时更新 robotd 和 Studio（IPC API 70）。
+硬件驱动在「配置 → 硬件」选择 `xl330` 或 `feetech1910`，保存到 robotd 的 `[bus].driver`，重启 robotd 后统一生效。网页会区分当前运行和已保存选项。此变更要求同时更新 robotd 和 Studio（IPC API 72）。
 
 ## 舵机调试功能
 
@@ -14,6 +14,7 @@
 - 卸力、固定保持、柔顺跟随；位置目标小步推进，关节方向和机械限位须显式配置。
 - 调试页显示关节实测姿态；未标定关节明确提示。使用 RL 原始 STL 生成的独立完整模型，所有资源本地提供，无 CDN；生成方式见[设计说明](../docs/design/servo-studio.md)。
 - 调零页固定显示 `DEFAULT_POSITION` 标准参照。“回归零位”回到当前标定对应的标准姿态；“将当前姿态设为零位”在稳定采样后计算软件偏移、备份并原子保存。
+- 摆姿标定保存后，可通过控制台的关节选择框逐个修改软件零位并保存。需要先卸力；只保存选中关节，保留其他标定和 IMU 数据，自动备份，不自动移动。之后“回归零位”使用最新偏移。
 - 身体 IMU 独立静态水平校准：直立桌面静止采样，检查计数器/诊断/角速度/稳定性，不修改舵机零位。
 
 这版面向飞特 HD1910 和身体 IMU firmware-1.0.0；不提供 XL330 网页调试。头部 IMU 的既有数据流仍由相应服务提供，没有在此页面伪装成身体 IMU 或自动修改头部安装参数。
@@ -21,6 +22,7 @@
 ## 运行
 
 ```sh
+sh scripts/build-studio.sh
 cargo build -p studio -p robotd
 ```
 
@@ -30,14 +32,11 @@ cargo build -p studio -p robotd
 studio --robot-socket /run/robotd.sock --listen 0.0.0.0:8080
 ```
 
-首次装机、没有完整标定或没有 IMU 时，使用 robotd 的独立调试启动方式。它仍独占串口，并暂停普通控制；不需要另开串口服务。若已有 robotd 服务在运行，先由操作员停止旧实例，再启动此实例；文件锁会拒绝同时运行。
+首次装机或标定不完整时，正常启动 robotd 即可自动进入装机状态，不再需要 `--servo-debug`。Studio 会显示首次标定引导；所有方向、限位、零位、身体 IMU 安装标定和速度/电流单位都通过校验后，才可明确完成标定。完成后保持停止，需主动启用正常控制。
 
-```sh
-robotd --servo-debug --no-policy --port /dev/ttyS0 \
-  --servo-calibration /etc/robot/feetech1910.json
-```
+默认服务不带 `--port`，串口在「配置 → 硬件」保存。香橙派原 HAT 使用 `/dev/ttyS0`；网页区分已保存端口和实际端口。若操作员显式用 `robotd --port ...` 启动，网页会显示覆盖提示并禁止修改端口，后端同样拒绝。正常 P 与卸力 P 分别保存到 `policy.gain` 和 `safety.gain_limp`，调试保持 P 只影响当前调试会话。
 
-完成所有标定和必需参数后，正常启动 robotd 才恢复运动能力。`--servo-debug` 实例退出网页调试后仍不会启用普通运动，须以正常方式重新启动。
+旧版本手动添加的标准 `commissioning.conf` 会由升级钩子迁移：先把原 CLI 端口保存在用户配置层，再备份并停用该临时覆盖文件。自定义覆盖不会被擅自改写；迁移失败会明确指出需要手动处理的文件。
 
 ## 操作流程
 
@@ -54,7 +53,7 @@ robotd --servo-debug --no-policy --port /dev/ttyS0 \
 
 默认 `/etc/robot/feetech1910.json`，可由 robotd 的 `--servo-calibration` 指定（启动、调试和重启使用同一路径）。零位为 `joints[].zero_ticks`，单位为编码器计数。方向/限位只有用户明确编辑并应用后才改变；保留 IMU、速度/电流单位和未知字段。IMU 单独更新 `imu_mount`。写入时先保留带时间戳的 `.bak`，再同步临时文件、原子替换。
 
-没有完整配置时可以保存标定草稿，但不会编造速度/电流单位或 IMU 安装方向。草稿不等于运动配置已就绪，正常 robotd 启动仍执行完整校验。不会改舵机 EEPROM 中位；P 写入仍沿用舵机自己的持久化设置，不改地址 55。
+没有完整配置时可以保存标定草稿，但不会编造速度/电流单位或 IMU 安装方向。草稿不等于运动配置已就绪，完成标定切回正常 IO 前仍执行完整校验。不会改舵机 EEPROM 中位；P 写入仍沿用舵机自己的持久化设置，不改地址 55。
 
 网页包没有串口权限需求；robotd 需要串口权限和标定目录写权限。正式/开发发布包均包含 Studio 程序、`studio.service` 和专用系统用户；安装、升级后自动启动并开机自启，默认访问 `http://主控IP:8080/`。服务以 `studio` 用户、`robot` 组运行，不需要 `orangepi` 账户。程序位于 `/opt/robot/daemon/current/bin/studio`。
 
@@ -72,11 +71,15 @@ journalctl -u studio -b
 ## 隔离模拟调试
 
 ```sh
-robotd --fake --servo-debug --no-policy --socket /tmp/duck-studio.sock \
+robotd --fake --no-policy --socket /tmp/duck-studio.sock \
   --servo-calibration /tmp/duck-studio-profile.json
 studio --listen 127.0.0.1:18081 --robot-socket /tmp/duck-studio.sock
 ```
 
-模拟标记始终显示；模拟设备默认的方向/量程仅用于测试，不应复制成实物机械标定。
+模拟标记始终显示；模拟装机同样从未知方向/限位开始；测试中填写的模拟机械范围不能复制为实物标定。
+
+按钮高度统一为 28 / 34 / 42px 三档，通过共享尺寸 token 管理；常规输入/选择控件为 42px，表格内紧凑控件为 34px。页面只选标准 size/density，不单独设按钮高度。
+
+前端源码位于 `studio/frontend`，使用 React、shadcn/ui 和 Tailwind。Node.js 22 与 npm 只用于开发机/CI 构建；`studio/web-dist` 是随 Rust 嵌入的已构建资源，设备不需要 Node。更改前端后运行 `scripts/build-studio.sh` 再构建 Rust，正式发布与开发发布会自动构建前端。
 
 源码职责、API 和状态约定见 [设计说明](../docs/design/servo-studio.md)。

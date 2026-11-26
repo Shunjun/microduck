@@ -5454,14 +5454,19 @@ mod tests {
         assert_eq!(media.bitrate_resolved(), 2_000_000);
     }
 
-    /// The shipped example must agree with the built-in defaults, or the file documents a
-    /// robot that does not exist — and an operator reading it would draw wrong conclusions
-    /// about what their board is actually doing.
+    /// The shipped Feetech configuration tunes both motor gains. Its other settings
+    /// still follow the library defaults used on an unconfigured robot.
     #[test]
-    fn the_shipped_example_matches_the_defaults() {
+    fn the_shipped_example_matches_the_defaults_with_feetech_gains() {
         let shipped = include_str!("../../deploy/robotd.toml");
         let from_file: Params = toml::from_str(shipped).expect("deploy/robotd.toml must parse");
         let built_in = Params::default();
+        assert_eq!(from_file.bus.driver, ServoDriver::Feetech1910);
+        assert_eq!((built_in.policy.gain, built_in.safety.gain_limp), (200, 50));
+        assert_eq!(
+            (from_file.policy.gain, from_file.safety.gain_limp),
+            (180, 40)
+        );
 
         assert_eq!(from_file.bus.port, built_in.bus.port);
         assert_eq!(from_file.bus.fast_sync_read, built_in.bus.fast_sync_read);
@@ -5488,7 +5493,9 @@ mod tests {
             from_file.control.publish_velocity_and_load,
             built_in.control.publish_velocity_and_load
         );
-        assert_eq!(from_file.policy.resolved(), built_in.policy.resolved());
+        let mut expected_policy = built_in.policy.resolved();
+        expected_policy.gain = 180;
+        assert_eq!(from_file.policy.resolved(), expected_policy);
         assert_eq!(from_file.safety.limp_fall, built_in.safety.limp_fall);
         assert_eq!(from_file.pickup, built_in.pickup);
         assert_eq!(from_file.idle, built_in.idle);

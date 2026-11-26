@@ -36,7 +36,9 @@ impl JointCalibration {
         }
         Ok(())
     }
-    pub(super) fn target(&self, radians: f64) -> Result<u16> {
+    /// Unrounded encoder target, shared with commissioning so an accepted calibration
+    /// can always command its reference pose through the normal driver.
+    pub fn target_ticks(&self, radians: f64) -> Result<f64> {
         let ticks = f64::from(self.zero_ticks)
             + radians * f64::from(self.direction) * 4096.0 / std::f64::consts::TAU;
         // Check before rounding: rounding must not disguise an out-of-range command.
@@ -49,7 +51,10 @@ impl JointCalibration {
                 self.id
             )));
         }
-        Ok(ticks.round() as u16)
+        Ok(ticks)
+    }
+    pub(super) fn target(&self, radians: f64) -> Result<u16> {
+        self.target_ticks(radians).map(|ticks| ticks.round() as u16)
     }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]

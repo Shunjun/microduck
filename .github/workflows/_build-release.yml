@@ -121,6 +121,14 @@ jobs:
       # compile time because a shipped robot has no git repository. A build without them
       # still works and reports "rev unknown" — which is exactly what a local build should
       # say, and why they are not required.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: studio/frontend/package-lock.json
+      - name: Build Studio frontend
+        run: sh scripts/build-studio.sh
+
       - name: Build for the board
         run: |
           export DUCK_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -185,6 +193,7 @@ jobs:
             --include "scripts/rkaiq-modinfo-shim.c=scripts/rkaiq-modinfo-shim.c" \
             --include "scripts/setup-login.sh=scripts/setup-login.sh" \
             --include "scripts/setup-quiet-boot.sh=scripts/setup-quiet-boot.sh" \
+            --include "scripts/migrate-commissioning.py=scripts/migrate-commissioning.py" \
             --include "scripts/seed-policies.sh=scripts/seed-policies.sh" \
             --include "scripts/seed-detector.sh=scripts/seed-detector.sh" \
             --include "scripts/robot-rescue=scripts/robot-rescue" \

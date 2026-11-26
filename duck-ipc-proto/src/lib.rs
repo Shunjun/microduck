@@ -675,7 +675,9 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// client watches [`method::PHOTO_LIST`] for the picture. Answered by `nfcd`; an older one answers
 /// METHOD_NOT_FOUND, by name, which is how a client tells a robot that cannot.
 /// v70 adds robot.hardware / robot.setHardware; update robotd with Studio.
-pub const API_VERSION: u32 = 70;
+/// v71 adds robot.servoDebug set_zero for individually saved software zeros.
+/// v72 adds live port/gain settings and the explicit commissioning finish.
+pub const API_VERSION: u32 = 72;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -2885,16 +2887,37 @@ pub struct ComponentParams {
 // Fixing it in the protocol deletes that entire category of flag.
 
 /// Persisted servo protocol choice. robotd validates the label before changing the file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HardwareParams {
     pub servo_driver: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normal_p: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limp_p: Option<u16>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerialPortInfo {
+    pub path: String,
+    pub accessible: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HardwareResult {
     pub active_driver: String,
     pub configured_driver: String,
     pub restart_required: bool,
+    pub configured_port: String,
+    pub effective_port: String,
+    pub port_override: bool,
+    pub ports: Vec<SerialPortInfo>,
+    pub normal_p: u16,
+    pub limp_p: u16,
+    pub calibration_required: bool,
+    pub calibration_error: Option<String>,
+    pub bus_status: String,
+    pub bus_error: Option<String>,
 }
 
 /// Velocity twist. Continuous intent — see [`method::ROBOT_MOVE`].
@@ -8954,6 +8977,7 @@ mod hardware_protocol_tests {
             Call::RobotHardware,
             Call::RobotSetHardware(HardwareParams {
                 servo_driver: "xl330".into(),
+                ..Default::default()
             }),
         ] {
             let request = Request::call(Id::Number(1), &call);
@@ -8962,7 +8986,8 @@ mod hardware_protocol_tests {
         assert!(!Call::RobotHardware.is_mutating());
         assert!(
             Call::RobotSetHardware(HardwareParams {
-                servo_driver: "xl330".into()
+                servo_driver: "xl330".into(),
+                ..Default::default()
             })
             .is_mutating()
         );

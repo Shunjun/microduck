@@ -104,6 +104,14 @@ if [ -f "$script" ]; then
         || echo "postinstall: the duck detector was not seeded; mediad will say so if asked for it" >&2
 fi
 
+# //Compatible: retire only the temporary first-install override from older Studio builds.
+# Keep its formerly effective serial port in persisted params before removing the CLI override.
+# Unknown operator drop-ins are never rewritten; a failure is actionable and leaves the file.
+script=scripts/migrate-commissioning.py
+if [ -f "$script" ] && [ -f "${UNIT_DIR}/robotd.service.d/commissioning.conf" ]; then
+    python3 "$script" || exit 1
+fi
+
 [ -d systemd ] || exit 0
 
 # Users and groups before units: a unit naming a `User=` that does not exist fails to start, and
