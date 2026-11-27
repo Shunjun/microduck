@@ -80,7 +80,11 @@ fn permits(call: &proto::Call) -> bool {
     use proto::Call::*;
     match call {
         // Servo commissioning and hardware configuration use the local Studio/robotd path.
-        RobotServoDebug(_) | RobotHardware | RobotSetHardware(_) => false,
+        RobotPeripherals
+        | RobotSetPeripherals(_)
+        | RobotServoDebug(_)
+        | RobotHardware
+        | RobotSetHardware(_) => false,
         // The version handshake. Must be reachable or no client can establish anything.
         Hello(_) => true,
 
@@ -632,6 +636,8 @@ mod tests {
     #[test]
     fn hardware_configuration_stays_on_the_local_studio_path() {
         for call in [
+            proto::Call::RobotPeripherals,
+            proto::Call::RobotSetPeripherals(Default::default()),
             proto::Call::RobotHardware,
             proto::Call::RobotSetHardware(proto::HardwareParams {
                 servo_driver: "feetech1910".into(),

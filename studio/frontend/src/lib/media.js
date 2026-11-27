@@ -1,13 +1,6 @@
 // Local-LAN consumer of mediad's existing gst-plugins-rs signalling protocol.
 export function mediaUrl() {
-  try {
-    return (
-      localStorage.getItem('microduck.studio.signalling') ||
-      `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:8443`
-    )
-  } catch {
-    return `ws://${location.hostname}:8443`
-  }
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/video`
 }
 export function connectMedia(video, report, url = mediaUrl()) {
   const address = new URL(url)
@@ -24,7 +17,7 @@ export function connectMedia(video, report, url = mediaUrl()) {
     }
   const deadline = setTimeout(() => {
     if (!closed && (!pc || pc.connectionState !== 'connected')) {
-      report('摄像头连接超时，请检查 mediad 和信令地址')
+      report('摄像头连接超时，请检查设备的视频服务')
       stop()
     }
   }, 15000)
@@ -134,7 +127,7 @@ export function connectMedia(video, report, url = mediaUrl()) {
       })
   }
   ws.onerror = () => {
-    if (!closed) report('无法连接媒体信令服务，请在配置中检查地址，并确认 mediad 正在运行')
+    if (!closed) report('无法连接本设备的视频服务，请确认摄像头和视频服务已就绪')
   }
   ws.onclose = () => {
     if (!closed) {

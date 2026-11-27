@@ -796,6 +796,8 @@ pub const TEST_PATTERN_GEOMETRY: (u32, u32, u32) = (256, 144, 5);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MediaParams {
+    /// Capture node; unset uses /dev/video0, `none` publishes no camera frames.
+    pub camera_device: Option<String>,
     /// Where the video comes from: the head camera, or a test pattern for a board without one.
     /// [`MediaSource`] says why this is a name rather than a boolean.
     pub source: MediaSource,
@@ -918,6 +920,7 @@ impl CameraIntrinsics {
 impl Default for MediaParams {
     fn default() -> Self {
         Self {
+            camera_device: None,
             // The camera, because a robot with a camera is the case. A board without one shows a
             // test pattern instead, and only if somebody names it.
             source: MediaSource::Camera,
@@ -1822,7 +1825,10 @@ mod head_imu_tests {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AudioParams {
-    /// Master switch: no sounds, no mic worker.
+    /// Independent selectors; unset inherits the board audio routing, `none` disables one path.
+    pub microphone_device: Option<String>,
+    pub speaker_device: Option<String>,
+    /// Legacy default for paths without an explicit independent selector.
     pub enabled: bool,
     /// ALSA playback device — the TLV320AIC3104 codec. When it names a card this board does
     /// not have, [`AudioParams::resolve_devices`] falls back to ALSA's `default`.
@@ -1853,6 +1859,8 @@ pub struct AudioParams {
 impl Default for AudioParams {
     fn default() -> Self {
         Self {
+            microphone_device: None,
+            speaker_device: None,
             enabled: true,
             device: "plughw:aic3104".to_owned(),
             bank: PathBuf::from("/var/lib/robot/sounds"),
@@ -1889,6 +1897,9 @@ impl AudioParams {
         }
     }
 
+    /// Explicit independent selectors are used literally, including `none`; only an unset
+    /// selector inherits the routing below.
+    ///
     /// The playback and capture devices to use on a board whose ALSA cards are `cards` (the
     /// ids in `/proc/asound/cards`, see [`alsa_card_ids`]).
     ///
@@ -1903,6 +1914,34 @@ impl AudioParams {
     /// A device that names no card (`default`, a PCM from an asound.conf, a numeric card) is
     /// used as written: there is nothing to check it against.
     pub fn resolve_devices(&self, cards: &[String]) -> ResolvedAudio {
+        //Compatible: absent independent selectors retain the established board routing.
+        let mut resolved = self.resolve_legacy_devices(cards);
+        if let Some(device) = &self.speaker_device {
+            resolved.playback = device.clone();
+        }
+        if let Some(device) = &self.microphone_device {
+            resolved.capture = device.clone();
+        }
+        resolved
+    }
+
+    pub fn playback_enabled(&self) -> bool {
+        match self.speaker_device.as_deref() {
+            Some(device) => device != "none",
+            //Compatible: old configurations retain their audio gate until a selector is saved.
+            None => self.enabled && self.device != "none",
+        }
+    }
+
+    pub fn capture_enabled(&self) -> bool {
+        match self.microphone_device.as_deref() {
+            Some(device) => device != "none",
+            //Compatible: old configurations retain their audio gate until a selector is saved.
+            None => self.enabled && self.device != "none",
+        }
+    }
+
+    fn resolve_legacy_devices(&self, cards: &[String]) -> ResolvedAudio {
         match named_card(&self.device) {
             Some(card) if !cards.iter().any(|c| c == card) => ResolvedAudio {
                 playback: "default".to_owned(),
@@ -1922,12 +1961,24 @@ impl AudioParams {
     /// [`Self::resolve_devices`] takes to ALSA's `default` — the board's own codec, the first
     /// card that is one [`SpeakerCodec`] knows. `None` for a codec it does not know.
     pub fn speaker_mixer(&self, cards: &[String]) -> Option<SpeakerMixer> {
+        if !self.playback_enabled() {
+            return None;
+        }
         let mixer = |card: &str| {
             SpeakerCodec::of_card(card).map(|codec| SpeakerMixer {
                 card: card.to_owned(),
                 codec,
             })
         };
+        if let Some(device) = &self.speaker_device {
+            if device == "default" {
+                return cards.iter().find_map(|card| mixer(card));
+            }
+            // An explicit PCM must never change an unrelated card's mixer.
+            return named_card(device)
+                .filter(|card| cards.iter().any(|c| c == card))
+                .and_then(mixer);
+        }
         match named_card(&self.device) {
             Some(card) if cards.iter().any(|c| c == card) => mixer(card),
             _ => cards.iter().find_map(|card| mixer(card)),
@@ -1941,6 +1992,35 @@ impl AudioParams {
             Some(p) => Some(p.clone()),
             None => Some(PathBuf::from(RELEASE_DIR).join("models/pet_detect.onnx")),
         }
+    }
+}
+
+/// Device identifiers are passed as arguments, never evaluated as shell or pipeline syntax.
+pub fn valid_peripheral_device(value: &str, camera: bool) -> bool {
+    if value == "none" {
+        return true;
+    }
+    if value.is_empty()
+        || value == "unset"
+        || value.len() > 256
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+    {
+        return false;
+    }
+    if camera {
+        let path = std::path::Path::new(value);
+        path.starts_with("/dev")
+            && path.file_name().is_some()
+            && path.components().count() >= 3
+            && !value.ends_with('/')
+            && !path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+    } else {
+        value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_:-.,= /".contains(c))
     }
 }
 
@@ -3594,6 +3674,32 @@ impl Params {
         // Refused rather than clamped, like `control.hz`: the editor should say which value it
         // was not going to guess at. The floor is 10 because netpadd's 100 ms fallback tick must
         // not be faster than the cap, and below a few Hz a held stick would outrun robotd's deadman.
+        for (key, value, camera) in [
+            (
+                "audio.microphone_device",
+                self.audio.microphone_device.as_deref(),
+                false,
+            ),
+            (
+                "audio.speaker_device",
+                self.audio.speaker_device.as_deref(),
+                false,
+            ),
+            (
+                "media.camera_device",
+                self.media.camera_device.as_deref(),
+                true,
+            ),
+        ] {
+            if let Some(value) = value
+                && !valid_peripheral_device(value, camera)
+            {
+                return Err(ParamsError::Audio {
+                    path: path.display().to_string(),
+                    reason: format!("{key}: invalid device identifier"),
+                });
+            }
+        }
         if self.audio.volume > 100 {
             return Err(ParamsError::Audio {
                 path: path.display().to_string(),
@@ -4704,6 +4810,61 @@ mod tests {
             ..AudioParams::default()
         };
         assert_eq!(spelled_out.capture_device(), "plughw:aic3104,0");
+    }
+
+    #[test]
+    fn independent_audio_none_never_falls_back_or_disables_the_other_path() {
+        let mut audio = AudioParams {
+            speaker_device: Some("none".into()),
+            microphone_device: Some("plughw:missing,0".into()),
+            ..Default::default()
+        };
+        assert!(!audio.playback_enabled());
+        assert!(audio.capture_enabled());
+        let resolved = audio.resolve_devices(&[]);
+        assert_eq!(resolved.playback, "none");
+        assert_eq!(resolved.capture, "plughw:missing,0");
+        assert!(audio.speaker_mixer(&["aic3104".into()]).is_none());
+        audio.speaker_device = Some("plughw:missing,0".into());
+        audio.microphone_device = Some("none".into());
+        assert!(audio.playback_enabled());
+        assert!(!audio.capture_enabled());
+        assert_eq!(audio.resolve_devices(&[]).playback, "plughw:missing,0");
+        assert!(audio.speaker_mixer(&["aic3104".into()]).is_none());
+    }
+
+    #[test]
+    fn explicit_selectors_enable_only_the_chosen_path_over_the_legacy_gate() {
+        let mut audio = AudioParams {
+            enabled: false,
+            ..Default::default()
+        };
+        assert!(!audio.capture_enabled());
+        assert!(!audio.playback_enabled());
+        audio.microphone_device = Some("default".into());
+        assert!(audio.capture_enabled());
+        assert!(!audio.playback_enabled());
+        audio.microphone_device = Some("none".into());
+        audio.speaker_device = Some("default".into());
+        assert!(!audio.capture_enabled());
+        assert!(audio.playback_enabled());
+    }
+
+    #[test]
+    fn peripheral_identifiers_reject_empty_control_and_traversal() {
+        for invalid in [
+            "",
+            " /dev/video0",
+            "/dev/../etc/passwd",
+            "/tmp/camera",
+            "/dev/video0\n",
+        ] {
+            assert!(!valid_peripheral_device(invalid, true), "{invalid:?}");
+        }
+        assert!(valid_peripheral_device("none", true));
+        assert!(valid_peripheral_device("/dev/v4l/by-id/camera", true));
+        assert!(valid_peripheral_device("plughw:CARD=facemic,DEV=0", false));
+        assert!(!valid_peripheral_device("default; touch /tmp/x", false));
     }
 
     /// A board without the configured card plays and records on ALSA's `default`, which the

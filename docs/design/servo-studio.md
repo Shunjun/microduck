@@ -64,16 +64,47 @@ mediad 的 unit 改放在 `optional-systemd/`，避免自动启用或在每次�
 
 `/api/session` 为同源 WebSocket，绑定一条长期 robotd 连接，白名单转发已存在的控制/订阅/配置方法，最大单条浏览器消息 16 KiB。10 Hz 订阅实测关节姿态；摇杆每 50 ms 发送一次连续意图，幅度与临时速度上限线性相乘，斜向输入归一化。松手、取消、窗口失焦、隐藏页面、路由离开、全局停止均清零本页摇杆；调试模式下顶栏改为“调试：全部卸力”并在操作前确认，避免将普通停止与卸力混淆；重连不重放运动。断连后不再转发，最后指令由 robotd deadman 过期。浏览器失去心跳 10 秒后桥接退出。持续运动会校验反馈新鲜度，超过 1.5 秒停止发送。
 
-当前控制来源从 `move.source` 展示，不声称独占其他客户端。电量读取 `robot.health.battery`，保留 2S 电压估算的限制；请求往返不是视频延迟；没有数据显示未知。身体状态沿用已摔倒/被抱起/低增益报告，不把“未摔倒”称为“平稳”。`media.js` 按既有 mediad/gst 信令协议连接局域网 WebRTC 视频，默认使用本机 8443，地址在配置页按浏览器保存。仅在明确点击连接后建立媒体会话，切回 3D 或离开页面会关闭。mediad 仍为可选服务，不由 Studio 启动；连接失败明确报告，不显示示意视频。本版不接入远程账户/中继。自主行动只保留入口，不提供伪造任务、日志或 LLM 调用。
+当前控制来源从 `move.source` 展示，不声称独占其他客户端。电量读取 `robot.health.battery`，保留 2S 电压估算的限制；请求往返不是视频延迟；没有数据显示未知。身体状态沿用已摔倒/被抱起/低增益报告，不把“未摔倒”称为“平稳”。`media.js` 按既有 mediad/gst 信令协议连接局域网 WebRTC 视频，浏览器连接 Studio 同源 `/api/video`，由 Studio 转发到本机回环地址的视频服务，默认 `ws://127.0.0.1:8443`；页面不提供地址编辑，也不读取旧浏览器自定义地址。仅在明确点击连接后建立媒体会话，切回 3D 或离开页面会关闭。mediad 仍为可选服务，不由 Studio 启动；连接失败明确报告，不显示示意视频。本版不接入远程账户/中继。自主行动只保留入口，不提供伪造任务、日志或 LLM 调用。
 
 ## 本地动作库
 
 `studio/src/library.rs` 唯一管理上传文件。默认 `/var/lib/microduck-studio/actions`，可由 `--library-dir` 指定；unit 使用 `StateDirectory=microduck-studio` 提供目录写权限，保持 ProtectSystem 等限制。robotd 读取世界可读的模型，网页服务没有舵机或配置目录写权限。
 
-导入必须同时选择 `.onnx` 和 `manifest.json`。页面显示名称、描述、类型、时长、持续策略槽位，并支持完整 JSON 编辑；未识别字段原样保留。支持 constant 编码的 episodic 动作和 walk/stand perpetual 策略。详细 manifest 契约归 [policy-manifest.md](../policy-manifest.md) 所有。
+导入必须同时选择 `.onnx` 和 `manifest.json`。页面显示名称、描述、类型、时长、适用策略，并支持完整 JSON 编辑；未识别字段原样保留。支持 constant 编码的 episodic 动作、walk/stand perpetual 策略、posture_flag 编码的 sitstand 和 phase 编码的 ground_pick。单次动作可选 kick_left、kick_right 或 roulade 槽位；持续策略必须声明适用槽位。详细 manifest 契约归 [policy-manifest.md](../policy-manifest.md) 所有。
+
+策略绑定位于动作库「策略」页签，与「模型」列表分开。下拉框按槽位、类型和指令编码筛选，显示别名或模型名称，不显示设备路径。多个模型可以声明同一槽位，运行端一次绑定一个；更换需确认，等待运行端确认加载后才报告成功。
+
+单次动作收藏与所有模型的显示别名存放在各动作目录的 `studio.json`，由 `/api/actions/{id}/favorite` 和 `/api/actions/{id}/alias` 原子保存，使用与模型导入相同的同源限制和设备端互斥锁。两项互不覆盖，也不写入训练 manifest；空别名回退到原标识。操控页显示已收藏的模型，未注册或路径不匹配的动作禁用，调用仍发送原 manifest.name。
+
+操控页的启动开关读取 `robot.policies.control_enabled`，不以模型配置的 enabled 代替运行状态。开启调用 `robot.enable`，关闭调用 `robot.relax`；摇杆、平移和动作仅在控制开启且设备就绪时可用。固定动作与收藏动作分区，sit_toggle 按 sitting 状态显示坐下或起立。预览相机正俯仰表示地板上方，默认约 17°，可拖动范围 −30° 至 70°。
 
 HTTP API：`GET /api/actions` 列表；`POST /api/actions` 原子导入；`PUT /api/actions/{sha256}/manifest` 校验、备份并保存说明。导入 body 为 4 字节大端 JSON 长度、UTF-8 manifest、ONNX 三段，浏览器直接传 Blob，避免模型 Base64 膨胀。manifest 上限 64 KiB、ONNX 上限 32 MiB；不接收客户端路径。存储键为模型 SHA-256，同模型重复导入拒绝并提示编辑已有说明。先写暂存目录、调用既有 `duck_control::policy::validate` 验证 ONNX 接口，成功后原子发布；失败清理暂存，不生成已安装项。设备需要既有 ONNX Runtime；缺失时报告原因，不能跳过模型检查。
 
 导入/保存不启用任何动作。单次动作须显式经 `robot.setSkill` 注册，之后才可确认试运行；持续策略须显式绑定 `robot.loadPolicy`。`robot.skills` 是可编辑的配置记录；操控页结合 `robot.policies` 的启用状态与动作名以及实时健康反馈显示快捷动作，不把关闭策略时的默认配置当作可执行动作。列表不在网页写死。移除自定义配置经 `robot.removeSkill`，原版动作恢复默认、模型文件保留。修改 manifest 不修改已注册配置或运行中的策略，需重新注册/绑定。预览插画只是动作图标，不是由模型推演出的动作；3D 只展示实测状态。
 
-硬件选项通过 robotd 的 API 和配置文件管理，机制归 [飞特硬件说明](feetech-hardware.md)；当前协议版本 72，部署须同时更新 robotd 与 Studio。方向与限位在配置页编辑，按原契约先应用会话，采集保存零位时写入设备配置。操控偏好仅保存于当前浏览器并明确标注，不冒充 robotd 的持久化参数。
+硬件选项通过 robotd 的 API 和配置文件管理，机制归 [飞特硬件说明](feetech-hardware.md)；当前协议版本 73，部署须同时更新 robotd 与 Studio。方向与限位在配置页编辑，按原契约先应用会话，采集保存零位时写入设备配置。操控偏好仅保存于当前浏览器并明确标注，不冒充 robotd 的持久化参数。
+
+
+## 外设配置
+
+Studio 的硬件页通过 `robot.peripherals` / `robot.setPeripherals`（IPC API 73）读取及原子保存
+麦克风、扬声器、摄像头选择。它们分别写入 `[audio] microphone_device`、`speaker_device`、
+`volume` 和 `[media] camera_device`、`quality`。未设置的设备选择沿用既有板级默认；明确填写的
+ALSA PCM 不进行缺卡回退。任一选择为 `none` 只关闭对应通路；摄像头关闭时不打开设备、不连接
+模拟相机，也不生成测试图。明确保存的麦克风、扬声器选择各自决定是否启用；`[audio] enabled`
+仅为没有独立选择的旧配置提供默认值。旧配置禁用的通路在接口中显示为 `none`，用户选择设备即可
+启用该通路，不需要另行修改隐藏开关。明确选择非 `none` 摄像头时，同一保存事务将
+`media.source` 设为 `camera`；仅修改音频或选择 `none` 不改写原有视频来源。
+
+列表来自 `/proc/asound/pcm`、声卡 ID 及 `/sys/class/video4linux` 元数据，不通过打开设备来探测；
+保留未枚举到的已选标识；网页音视频设备仅提供下拉选择，串口仍允许手动输入。列表中的 available 表示系统枚举存在，不保证可成功采集
+或播放。音量只写已支持的硬件混音器；无法驱动所选 PCM 的混音器时保存配置并明确提示。
+
+这些接口返回的是保存值，不是硬件已生效的断言。音频配置与 robotd 启动快照不同则列出 robotd
+重启需求；mediad 尚无活动配置查询接口，因此不将未知的活动状态断言为待重启，
+只通过提示说明摄像头变更后需要重启 mediad。
+页面不自动重启服务。robotd 在 Linux 上检查运行中的 mediad 的 `/proc/*/cmdline`，发现明确的
+`--camera-device` 时锁定摄像头节点编辑并说明覆盖值；进程未运行或 `/proc` 不可读时无法观察该覆盖。
+mediad 始终优先使用自身明确的命令行节点覆盖。
+
+麦克风选择配置现有的听觉/抚摸检测采集工作线程；它不新增 WebRTC 音频、录音试听或测试音。

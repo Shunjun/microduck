@@ -1,4 +1,9 @@
 // Depth-tested browser rendering. Studio uses full CAD geometry; joint order follows robotctl.
+export const DEFAULT_VIEW = Object.freeze({ yaw: 0.8, pitch: 0.3, zoom: 1 })
+export const PITCH_LIMITS = Object.freeze({ min: -Math.PI / 6, max: 70 * Math.PI / 180 })
+export const clampPitch = (pitch) => Math.max(PITCH_LIMITS.min, Math.min(PITCH_LIMITS.max, pitch))
+export const draggedPitch = (pitch, deltaY) => clampPitch(pitch + deltaY * 0.008)
+export const cameraUniforms = (yaw, pitch) => [Math.cos(yaw), Math.sin(yaw), Math.cos(pitch), -Math.sin(pitch)]
 const add = (a, b) => a.map((v, i) => v + b[i])
 const cross = (a, b) => [
   a[1] * b[2] - a[2] * b[1],
@@ -115,9 +120,7 @@ export class Preview {
     this.canvas = canvas
     this.lifetime = new AbortController()
     this.angles = Array(15).fill(0)
-    this.yaw = 0.8
-    this.pitch = 0.3
-    this.zoom = 1
+    Object.assign(this, DEFAULT_VIEW)
     this.model = null
     this.queued = false
     this.disposed = false
@@ -156,7 +159,7 @@ export class Preview {
     canvas.addEventListener('pointermove', (event) => {
       if (!last) return
       this.yaw += (event.clientX - last[0]) * 0.01
-      this.pitch = Math.max(-0.3, Math.min(1.2, this.pitch - (event.clientY - last[1]) * 0.008))
+      this.pitch = draggedPitch(this.pitch, event.clientY - last[1])
       last = [event.clientX, event.clientY]
       this.draw()
     })
@@ -238,9 +241,7 @@ export class Preview {
     this.draw()
   }
   reset() {
-    this.yaw = 0.8
-    this.pitch = 0.3
-    this.zoom = 1
+    Object.assign(this, DEFAULT_VIEW)
     this.draw()
   }
   draw() {
@@ -325,13 +326,9 @@ export class Preview {
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
     gl.useProgram(this.program)
     gl.uniform2f(this.size, w, h)
-    gl.uniform4f(
-      this.camera,
-      Math.cos(this.yaw),
-      Math.sin(this.yaw),
-      Math.cos(this.pitch),
-      Math.sin(this.pitch),
-    )
+    // Positive pitch is camera elevation above the floor. Clip depth increases away
+    // from the viewer, so elevation contributes -sin(pitch) to the depth axis.
+    gl.uniform4f(this.camera, ...cameraUniforms(this.yaw, this.pitch))
     gl.uniform1f(this.scale, Math.min(w, h) * 2.3 * this.zoom)
 
     // The grid is a background guide, not an opaque floor cutting through the feet.

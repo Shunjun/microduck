@@ -78,26 +78,29 @@ export interface Manifest {
   kind: string
   duration_s?: number | null
   slot?: string
-  command: { idle: unknown }
+  command: { idle: unknown; encoding?: string }
   unwind_s?: number
   chain?: unknown
   action_scale?: unknown
   [key: string]: unknown
 }
 export interface Entry {
+  alias?: string
+  favorite?: boolean
   id: string
   path: string
   bytes: number
   manifest: Manifest
 }
 export interface Skills {
-  skills: { name: string; duration?: number; overridden: boolean }[]
+  skills: { name: string; path?: string; duration?: number; overridden: boolean }[]
   built_in?: string[]
 }
 export interface Policy {
   slot: string
   path: string | null
+  overridden?: boolean
   error?: string
 }
 
-export interface Policies { enabled: boolean; skills?: string[]; slots: Policy[] }
+export interface Policies { enabled: boolean; control_enabled?: boolean; skills?: string[]; slots: Policy[]; sitting?: boolean; homed?: boolean }

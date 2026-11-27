@@ -1,7 +1,14 @@
 import {strict as assert} from 'node:assert';
 import {readFile} from 'node:fs/promises';
 const source=await readFile(new URL('../frontend/src/lib/media.js',import.meta.url),'utf8');
-const {connectMedia}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const {connectMedia,mediaUrl}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+globalThis.localStorage={getItem:()=> 'ws://another-machine:9999'};
+globalThis.location={protocol:'http:',hostname:'duck.local',host:'duck.local:8080'};
+assert.equal(mediaUrl(),'ws://duck.local:8080/api/video');
+globalThis.location={protocol:'https:',hostname:'duck.local',host:'duck.local'};
+assert.equal(mediaUrl(),'wss://duck.local/api/video');
+globalThis.location={protocol:'http:',host:'[::1]:18087'};
+assert.equal(mediaUrl(),'ws://[::1]:18087/api/video');
 class Socket {
   static OPEN=1;
   constructor(){this.readyState=1;this.messages=[];Socket.last=this;}

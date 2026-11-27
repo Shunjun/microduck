@@ -677,7 +677,8 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// v70 adds robot.hardware / robot.setHardware; update robotd with Studio.
 /// v71 adds robot.servoDebug set_zero for individually saved software zeros.
 /// v72 adds live port/gain settings and the explicit commissioning finish.
-pub const API_VERSION: u32 = 72;
+/// API 73 adds independent peripheral selection and saved configuration reports.
+pub const API_VERSION: u32 = 73;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -896,6 +897,8 @@ pub mod method {
     /// Did the robot come up correctly? The post-update health gate.
     pub const ROBOT_HEALTH: &str = "robot.health";
     /// Active and configured servo driver; changing it requires a robotd restart.
+    pub const ROBOT_PERIPHERALS: &str = "robot.peripherals";
+    pub const ROBOT_SET_PERIPHERALS: &str = "robot.setPeripherals";
     pub const ROBOT_HARDWARE: &str = "robot.hardware";
     pub const ROBOT_SET_HARDWARE: &str = "robot.setHardware";
     /// Which model API version does this build implement?
@@ -1464,6 +1467,8 @@ pub enum Call {
     // ── robot.* ──────────────────────────────────────────────────────────────
     RobotSafeToRestart,
     RobotHealth,
+    RobotPeripherals,
+    RobotSetPeripherals(PeripheralsParams),
     RobotHardware,
     RobotSetHardware(HardwareParams),
     RobotModelApi,
@@ -1716,6 +1721,8 @@ impl Call {
             Call::Subscribe => method::SUBSCRIBE,
             Call::RobotSafeToRestart => method::ROBOT_SAFE_TO_RESTART,
             Call::RobotHealth => method::ROBOT_HEALTH,
+            Call::RobotPeripherals => method::ROBOT_PERIPHERALS,
+            Call::RobotSetPeripherals(_) => method::ROBOT_SET_PERIPHERALS,
             Call::RobotHardware => method::ROBOT_HARDWARE,
             Call::RobotSetHardware(_) => method::ROBOT_SET_HARDWARE,
             Call::RobotModelApi => method::ROBOT_MODEL_API,
@@ -1826,6 +1833,7 @@ impl Call {
                 | Call::SystemReboot
                 | Call::SystemSetPairingPin(_)
                 // Powering the machine off is at least as disruptive as rebooting it.
+                | Call::RobotSetPeripherals(_)
                 | Call::RobotSetHardware(_)
                 | Call::RobotServoDebug(_)
                 | Call::RobotShutdown
@@ -2019,7 +2027,10 @@ impl Call {
 
             // The skill table. `robotd` writes it and reloads itself afterwards, so one call is
             // enough — and it is the daemon that has to accept the result either way.
-            Call::RobotHardware | Call::RobotSetHardware(_) => (Robot, Slow),
+            Call::RobotPeripherals
+            | Call::RobotSetPeripherals(_)
+            | Call::RobotHardware
+            | Call::RobotSetHardware(_) => (Robot, Slow),
             Call::RobotSkills | Call::RobotSetSkill(_) | Call::RobotRemoveSkill(_) => (Robot, Slow),
             // Re-sweeps the radio rather than returning the last scan.
             Call::NetScan => (Config, Slow),
@@ -2146,6 +2157,8 @@ impl Call {
             Call::PadPair(p) => encode(p),
             Call::PadForget(p) => encode(p),
             Call::PadBind(p) => encode(p),
+            Call::RobotPeripherals => Value::Object(serde_json::Map::new()),
+            Call::RobotSetPeripherals(p) => encode(p),
             Call::RobotHardware => Value::Object(serde_json::Map::new()),
             Call::RobotSetHardware(p) => encode(p),
             Call::RobotSetSkill(p) => encode(p),
@@ -2221,6 +2234,8 @@ impl Call {
             method::SUBSCRIBE => Call::Subscribe,
             method::ROBOT_SAFE_TO_RESTART => Call::RobotSafeToRestart,
             method::ROBOT_HEALTH => Call::RobotHealth,
+            method::ROBOT_PERIPHERALS => Call::RobotPeripherals,
+            method::ROBOT_SET_PERIPHERALS => Call::RobotSetPeripherals(decode(params)?),
             method::ROBOT_HARDWARE => Call::RobotHardware,
             method::ROBOT_SET_HARDWARE => Call::RobotSetHardware(decode(params)?),
             method::ROBOT_MODEL_API => Call::RobotModelApi,
@@ -3760,6 +3775,9 @@ pub struct LoadPolicyParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PoliciesResult {
+    /// Current control intent, distinct from whether policy models are configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_enabled: Option<bool>,
     /// `"walk"` or `"roller"` — which mode's slot defaults are in play.
     pub mode: String,
     /// Whether policies are loaded at all (`[policy] enabled`). False is a legitimate bench
@@ -8991,5 +9009,58 @@ mod hardware_protocol_tests {
             })
             .is_mutating()
         );
+    }
+}
+
+/// Partial, atomic update of saved peripheral configuration. Restart units are in the response.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeripheralsParams {
+    pub microphone_device: Option<String>,
+    pub speaker_device: Option<String>,
+    pub camera_device: Option<String>,
+    pub speaker_volume: Option<u8>,
+    pub camera_quality: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeviceOption {
+    pub id: String,
+    pub label: String,
+    pub available: bool,
+}
+/// Saved settings; device presence does not imply a successful hardware open.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PeripheralsResult {
+    /// Whether the selected PCM has a supported hardware mixer on this OS.
+    pub speaker_volume_applies: bool,
+    pub microphone_device: String,
+    pub speaker_device: String,
+    pub camera_device: String,
+    pub speaker_volume: u8,
+    pub camera_quality: String,
+    pub microphones: Vec<DeviceOption>,
+    pub speakers: Vec<DeviceOption>,
+    pub cameras: Vec<DeviceOption>,
+    pub camera_port_override: bool,
+    pub restart_units: Vec<String>,
+    pub notices: Vec<String>,
+}
+
+#[cfg(test)]
+mod peripheral_protocol_tests {
+    use super::*;
+    #[test]
+    fn peripheral_calls_round_trip_and_set_is_mutating() {
+        for call in [
+            Call::RobotPeripherals,
+            Call::RobotSetPeripherals(PeripheralsParams {
+                microphone_device: Some("none".into()),
+                ..Default::default()
+            }),
+        ] {
+            assert_eq!(Request::call(Id::Number(1), &call).as_call().unwrap(), call);
+        }
+        assert!(!Call::RobotPeripherals.is_mutating());
+        assert!(Call::RobotSetPeripherals(Default::default()).is_mutating());
     }
 }

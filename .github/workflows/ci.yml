@@ -198,6 +198,8 @@ jobs:
           node-version: '22'
       - name: First-install commissioning against fake IO
         run: node studio/tests/commissioning.mjs
+      - name: Peripheral selection against fake IO
+        run: node studio/tests/peripherals.mjs
 
   board:
     # The target is aarch64; this is the only job that proves the binaries run there.

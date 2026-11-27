@@ -86,9 +86,10 @@ struct Args {
     #[arg(long)]
     config: Option<PathBuf>,
 
-    /// Which capture node. rkisp exposes several; `video0` is the main path.
-    #[arg(long, default_value = "/dev/video0")]
-    camera_device: String,
+    /// Override the configured capture node. rkisp exposes several; unset follows
+    /// [media].camera_device, then /dev/video0. `none` produces no video frames.
+    #[arg(long)]
+    camera_device: Option<String>,
 
     /// Sensor exposure in lines and analogue gain, in the sensor's own units — 256 is 1x on the
     /// IMX219, 64 on the GC2093.
@@ -406,18 +407,21 @@ fn main() -> ExitCode {
 
         // Matched rather than tested, so a source added to `MediaSource` fails the build here
         // instead of quietly arriving as a test pattern.
-        let source = match args.sim_camera.clone() {
-            Some(addr) => mediad::pipeline::Source::Sim(addr),
-            None => match media.source {
-                robotd_params::MediaSource::Camera => {
-                    mediad::pipeline::Source::Camera(mediad::pipeline::Camera {
-                        device: args.camera_device.clone(),
-                        exposure: args.exposure,
-                        analogue_gain: args.analogue_gain,
-                        expected,
-                    })
-                }
-                robotd_params::MediaSource::Test => mediad::pipeline::Source::Test,
+        let source = match mediad::config::camera_device(&media, args.camera_device.as_deref()) {
+            None => mediad::pipeline::Source::Disabled,
+            Some(camera_device) => match args.sim_camera.clone() {
+                Some(addr) => mediad::pipeline::Source::Sim(addr),
+                None => match media.source {
+                    robotd_params::MediaSource::Camera => {
+                        mediad::pipeline::Source::Camera(mediad::pipeline::Camera {
+                            device: camera_device.to_owned(),
+                            exposure: args.exposure,
+                            analogue_gain: args.analogue_gain,
+                            expected,
+                        })
+                    }
+                    robotd_params::MediaSource::Test => mediad::pipeline::Source::Test,
+                },
             },
         };
 
@@ -527,7 +531,7 @@ fn main() -> ExitCode {
                 );
                 None
             }
-            (mediad::pipeline::Source::Test, _) => None,
+            (mediad::pipeline::Source::Disabled | mediad::pipeline::Source::Test, _) => None,
             // A simulated camera has no sensor to write, and its brightness is the renderer's.
             (mediad::pipeline::Source::Sim(_), _) => None,
         };

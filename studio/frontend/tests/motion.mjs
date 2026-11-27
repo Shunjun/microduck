@@ -14,6 +14,17 @@ test('only finite nonzero measured body orientations rotate the model', () => {
   assert.equal(unitQuaternion([0, 0, 0, 0]), undefined)
   assert.equal(unitQuaternion([NaN, 0, 0, 0]), undefined)
 })
+test('lateral slider uses Y with left positive, shares speed and limits the trained lateral range', () => {
+  const prefs = { speed: 100, forward: 0.5, turn: 1 }
+  assert.equal(velocityFor(0, 0, 100, prefs, -1).vy, 0.3)
+  assert.equal(velocityFor(0, 0, 50, prefs, 1).vy, -0.15)
+  assert.equal(velocityFor(0, 0, 100, prefs, 2).vy, -0.3)
+  assert.equal(velocityFor(0, 0, 100, prefs, 0).vy, 0)
+  const combined = velocityFor(-0.5, -0.5, 50, prefs, -0.5)
+  assert.equal(combined.vx, 0.125)
+  assert.equal(combined.vyaw, 0.25)
+  assert.equal(combined.vy, 0.075)
+})
 
 test('deadman rejects missing, disconnected, and 1.5s old feedback', () => {
   assert.equal(isFeedbackFresh(true, true, 1499), true)

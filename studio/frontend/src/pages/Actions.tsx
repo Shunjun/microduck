@@ -1,6 +1,6 @@
 import { skillEntries } from '@/lib/skills'
 import { useEffect, useRef, useState } from 'react'
-import { Plus, RefreshCw } from 'lucide-react'
+import { Plus, RefreshCw, Star } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -22,6 +22,10 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { PolicyBindings } from '@/components/PolicyBindings'
+import { FileField } from '@/components/FileField'
+import { actionName } from '@/lib/action-name'
 import {
   Blank,
   Choice,
@@ -50,6 +54,8 @@ function Editor({ entry, close, saved }: EditorProps) {
   const initial = entry?.manifest || { kind: 'episodic' }
   const [raw, setRaw] = useState(JSON.stringify(initial, null, 2))
   const [model, setModel] = useState<File | null>(null)
+  const [alias, setAlias] = useState(entry?.alias ?? '')
+  const [storedId, setStoredId] = useState(entry?.id ?? '')
   const [imported, setImported] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -94,13 +100,15 @@ function Editor({ entry, close, saved }: EditorProps) {
     try {
       const metadata = new TextEncoder().encode(JSON.stringify(parse(raw)))
       if (metadata.length > 65536) throw Error('manifest 不能超过 64 KiB')
-      if (entry)
-        await http('/api/actions/' + encodeURIComponent(entry.id) + '/manifest', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: metadata,
-        })
-      else {
+      let id = storedId
+      if (id) {
+        if (!entry || raw !== JSON.stringify(entry.manifest, null, 2))
+          await http('/api/actions/' + encodeURIComponent(id) + '/manifest', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: metadata,
+          })
+      } else {
         if (
           !imported ||
           !model ||
@@ -111,11 +119,20 @@ function Editor({ entry, close, saved }: EditorProps) {
           throw Error('请同时选择非空且不超过 32 MiB 的 ONNX 和有效 manifest 文件')
         const header = new ArrayBuffer(4)
         new DataView(header).setUint32(0, metadata.length)
-        await http('/api/actions', {
+        const uploaded = await http<Entry>('/api/actions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/octet-stream' },
           body: new Blob([header, metadata, model]),
         })
+        id = uploaded.id
+        setStoredId(id)
+      }
+      try {
+        await http('/api/actions/' + encodeURIComponent(id) + '/alias', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ alias: alias.trim() }),
+        })
+      } catch (cause) {
+        throw Error('模型已保存，但别名保存失败；可重试保存。' + message(cause))
       }
       saved()
     } catch (cause) {
@@ -138,7 +155,7 @@ function Editor({ entry, close, saved }: EditorProps) {
           <DialogDescription>
             {entry
               ? '修改说明后，需重新注册或绑定才会更新运行端配置。'
-              : '同时选择模型与配套 manifest。保存只写入本机动作库。'}
+              : '请选择 ONNX 模型和配套的 manifest.json。选中后显示文件名；保存只导入动作库，不会驱动小鸭。'}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -148,21 +165,23 @@ function Editor({ entry, close, saved }: EditorProps) {
           }}
         >
           <FieldGroup>
-            {!entry && (
+            {!entry && !storedId && (
               <div className="grid gap-3 sm:grid-cols-2">
-                <TextField
-                  label="ONNX 模型（最多 32 MiB）"
-                  type="file"
+                <FileField
+                  label="ONNX 模型"
                   accept=".onnx"
-                  required
-                  onChange={(e) => setModel(e.target.files?.[0] || null)}
+                  maxBytes={32 * 1048576}
+                  hint="选择 .onnx 文件，最大 32 MiB。"
+                  disabled={working}
+                  onChange={setModel}
                 />
-                <TextField
+                <FileField
                   label="manifest.json"
-                  type="file"
                   accept=".json,application/json"
-                  required
-                  onChange={(e) => load(e.target.files?.[0])}
+                  maxBytes={65536}
+                  hint="选择与模型配套的 JSON 说明，最大 64 KiB；读取后可在下方编辑。"
+                  disabled={working}
+                  onChange={(file) => void load(file ?? undefined)}
                 />
               </div>
             )}
@@ -182,6 +201,7 @@ function Editor({ entry, close, saved }: EditorProps) {
                 onChange={(e) => patch({ description: e.target.value })}
               />
             </div>
+            <TextField label="显示别名（可选）" value={alias} maxLength={64} disabled={working} placeholder="例如：挥挥手" hint="支持中文。动作库和操控页优先显示别名；留空则显示动作标识。" onChange={(event) => setAlias(event.target.value)} />
             <Choice
               label="类型"
               value={data?.kind || 'episodic'}
@@ -195,9 +215,13 @@ function Editor({ entry, close, saved }: EditorProps) {
                   kind,
                   duration_s: kind === 'perpetual' ? null : data?.duration_s,
                   slot: kind === 'episodic' ? undefined : data?.slot,
+                  command: { ...data?.command, idle: data?.command?.idle ?? [0, 0, 0], encoding: 'constant' },
                 })
               }
             />
+            {data?.kind === 'episodic' && <Choice label="适用策略（可选）" value={data.slot || 'none'} options={[
+              ['none', '通用单次动作'], ['kick_left', '左脚踢球'], ['kick_right', '右脚踢球'], ['roulade', '前滚翻'],
+            ]} onChange={(value) => patch({ slot: value === 'none' ? undefined : value })} />}
             {data?.kind === 'episodic' ? (
               <TextField
                 label="持续时间（秒）"
@@ -221,8 +245,10 @@ function Editor({ entry, close, saved }: EditorProps) {
                   ['none', '不指定'],
                   ['walk', 'walk / 行走'],
                   ['stand', 'stand / 站立'],
+                  ['sitstand', 'sitstand / 坐下与起立'],
+                  ['ground_pick', 'ground_pick / 地面拾取'],
                 ]}
-                onChange={(v) => patch({ slot: v === 'none' ? undefined : v })}
+                onChange={(v) => patch({ slot: v === 'none' ? undefined : v, command: { ...data?.command, idle: data?.command?.idle ?? [0, 0, 0], encoding: v === 'ground_pick' ? 'phase' : v === 'sitstand' ? 'posture_flag' : 'constant' } })}
               />
             )}
             <Field>
@@ -254,6 +280,7 @@ function Editor({ entry, close, saved }: EditorProps) {
 }
 
 export function Actions() {
+  const [section, setSection] = useState('policies')
   const ready = useConnected()
   const [entries, setEntries] = useState<Entry[] | null>(null)
   const [skills, setSkills] = useState<Skills | null>(null)
@@ -264,8 +291,20 @@ export function Actions() {
   const [editor, setEditor] = useState<Entry | null | undefined>()
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
+  const [favoriteBusy, setFavoriteBusy] = useState(false)
   const { act, confirm, notify } = useFeedback()
   const refresh = () => setRevision((v) => v + 1)
+  async function favorite(entry: Entry) {
+    if (favoriteBusy) return
+    setFavoriteBusy(true)
+    await act(async () => {
+      const saved = await http<Entry>('/api/actions/' + encodeURIComponent(entry.id) + '/favorite', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ favorite: !entry.favorite }),
+      })
+      setEntries((current) => current?.map((item) => item.id === saved.id ? saved : item) ?? null)
+    }, entry.favorite ? '已取消收藏' : '已收藏，可在操控页找到这个动作')
+    setFavoriteBusy(false)
+  }
   useEffect(() => {
     let live = true
     setLibraryError('')
@@ -285,8 +324,10 @@ export function Actions() {
   }, [revision])
   useEffect(() => {
     let live = true
-    setSkills(null)
-    setPolicies(null)
+    if (!ready) {
+      setSkills(null)
+      setPolicies(null)
+    }
     setSkillsError('')
     if (ready)
       Promise.all([robot.request<Skills>('robot.skills'), robot.request<Policies>('robot.policies')])
@@ -296,14 +337,20 @@ export function Actions() {
         .catch((e) => {
           if (live) setSkillsError(message(e))
         })
+    const timer = ready ? setInterval(() => {
+      robot.request<Policies>('robot.policies').then((loaded) => {
+        if (live) setPolicies(loaded)
+      }).catch((error) => { if (live) setSkillsError(message(error)) })
+    }, 2000) : undefined
     return () => {
       live = false
+      clearInterval(timer)
     }
   }, [ready, revision])
   async function activate(entry: Entry) {
     const m = entry.manifest
     if (m.kind === 'perpetual') {
-      location.hash = 'settings/policies'
+      setSection('policies')
       return
     }
     if (await confirm('注册「' + m.name + '」？', '运行端配置将更新，可能触发重新就位。'))
@@ -328,34 +375,40 @@ export function Actions() {
   const filtered = entries?.filter(
     (e) =>
       (filter === 'all' || filter === e.manifest.kind) &&
-      [e.manifest.name, e.manifest.description]
+      [e.alias, e.manifest.name, e.manifest.description]
         .join(' ')
         .toLowerCase()
         .includes(search.toLowerCase()),
   )
-  const available = skills ? skillEntries(skills) : []
+  const strategySkills = new Set(['sit_toggle', 'ground_pick', 'kick_left', 'kick_right', 'roulade'])
+  const available = skills ? skillEntries(skills).filter((skill) => !strategySkills.has(skill.name)) : []
   return (
     <div className="flex flex-col gap-5">
       <Heading section="RL 动作 / 本机动作库" title="小鸭的动作收藏。">
         导入训练模型，编辑说明，再选择注册或绑定。
       </Heading>
+      <Tabs value={section} onValueChange={setSection}>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="mr-auto text-sm text-muted-foreground">
+        <TabsList aria-label="动作库视图"><TabsTrigger value="policies">策略</TabsTrigger><TabsTrigger value="models">模型</TabsTrigger></TabsList>
+        <span className="mr-auto text-xs text-muted-foreground">
           {entries ? '已导入 ' + entries.length + ' 个模型' : '读取本机动作库'}
         </span>
-        <Button onClick={() => setEditor(null)}>
+        <Button size="sm" onClick={() => setEditor(null)}>
           <Plus data-icon="inline-start" />
           导入动作
         </Button>
-        <Button variant="outline" onClick={refresh}>
+        <Button size="sm" variant="outline" onClick={refresh}>
           <RefreshCw data-icon="inline-start" />
           刷新
         </Button>
       </div>
+        <TabsContent value="models" className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center gap-3">
         <ToggleGroup
           type="single"
-          variant="outline"
+          variant="default"
+          size="sm"
+          aria-label="模型类型筛选"
           value={filter}
           onValueChange={(v) => {
             if (v) setFilter(v)
@@ -372,7 +425,7 @@ export function Actions() {
           ))}
         </ToggleGroup>
         <Input
-          className="max-w-xs"
+          className="h-(--control-height-sm) max-w-xs"
           type="search"
           aria-label="搜索动作"
           placeholder="搜索动作"
@@ -393,7 +446,8 @@ export function Actions() {
                       {entry.manifest.kind === 'episodic' ? '单次动作' : '持续策略'}
                     </Badge>
                   </div>
-                  <CardTitle>{entry.manifest.name}</CardTitle>
+                  <CardTitle>{actionName(entry)}</CardTitle>
+                  {entry.alias && <p className="text-xs text-muted-foreground">动作标识 · {entry.manifest.name}</p>}
                   <CardDescription>{entry.manifest.description || '暂无描述'}</CardDescription>
                 </CardHeader>
                 <CardContent className="text-sm text-muted-foreground">
@@ -401,11 +455,12 @@ export function Actions() {
                   {(entry.bytes / 1048576).toFixed(2)} MiB
                 </CardContent>
                 <CardFooter className="flex-wrap gap-2">
+                  {entry.manifest.kind === 'episodic' && <Button size="sm" variant="outline" aria-pressed={!!entry.favorite} disabled={favoriteBusy} onClick={() => void favorite(entry)}><Star data-icon="inline-start" className={entry.favorite ? 'fill-current' : undefined} />{entry.favorite ? '已收藏' : '收藏'}</Button>}
                   <Button variant="outline" onClick={() => setEditor(entry)}>
                     查看 / 编辑
                   </Button>
                   <Button variant="link" onClick={() => activate(entry)}>
-                    {entry.manifest.kind === 'episodic' ? '注册动作' : '前往策略配置'}
+                    {entry.manifest.kind === 'episodic' ? '注册动作' : '绑定策略'}
                   </Button>
                 </CardFooter>
               </Card>
@@ -418,7 +473,11 @@ export function Actions() {
               : '准备 .onnx 和配套 manifest.json，开始添加第一个动作。'}
           </Blank>
         ))}
-      <Panel title="运行端已配置动作" description="配置记录不代表模型已加载。策略与实时反馈就绪后才可试运行，试运行会驱动实物。">
+        </TabsContent>
+        <TabsContent value="policies" className="flex flex-col gap-5">
+          <Problem>{libraryError}</Problem>
+          <PolicyBindings entries={entries ?? []} policies={policies} refresh={refresh} />
+      <Panel title="其他动作" description="自定义动作和其他运行端动作。固定策略在上方选择模型并试运行。">
         <Problem>{skillsError}</Problem>
         {skills ? (
           available.length ? (
@@ -479,6 +538,8 @@ export function Actions() {
           !skillsError && <p className="text-sm text-muted-foreground">等待读取运行端动作…</p>
         )}
       </Panel>
+        </TabsContent>
+      </Tabs>
       {editor !== undefined && (
         <Editor
           entry={editor}

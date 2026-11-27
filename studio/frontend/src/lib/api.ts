@@ -46,7 +46,7 @@ class Robot extends EventTarget {
     let heartbeat = 0
     ws.onopen = async () => {
       try {
-        await this.request('hello', { api_version: 72, client: 'studio' })
+        await this.request('hello', { api_version: 73, client: 'studio' })
         await this.request('robot.subscribe', { hz: 10 })
         this.ready = true
         this.dispatchEvent(new Event('connection'))

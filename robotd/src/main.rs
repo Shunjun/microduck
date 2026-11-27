@@ -29,6 +29,7 @@ mod intents;
 mod laser;
 mod leds;
 mod params;
+mod peripherals;
 mod pickup;
 mod posture;
 mod runtime_hardware;
@@ -765,6 +766,7 @@ fn commissioning_required(args: &Args, params: &Params) -> bool {
 
 struct RobotState {
     hardware: runtime_hardware::Runtime,
+    peripherals: peripherals::Runtime,
     servo_debug: servo_debug::Hub,
     /// Epoch for every timestamp below. `Instant` so the clock cannot go backwards.
     started: Instant,
@@ -975,6 +977,7 @@ impl RobotState {
     ) -> Self {
         Self {
             hardware: runtime_hardware::Runtime::new(params),
+            peripherals: peripherals::Runtime::new(params),
             servo_debug: servo_debug::Hub::new(
                 PathBuf::from(FEETECH_CALIBRATION_PATH),
                 false,
@@ -1021,12 +1024,12 @@ impl RobotState {
             policy_enabled: params.policy.enabled,
             config_path: config_path.to_owned(),
             servo_driver: params.bus.driver,
-            has_voice: params.audio.enabled && has_any_wav(&params.audio.bank),
+            has_voice: params.audio.playback_enabled() && has_any_wav(&params.audio.bank),
             emotions: emotion::Library::load_release(&params.emotions.dir),
             theremin_ready: AtomicBool::new(false),
             laser_on: AtomicBool::new(false),
             theremin_on: AtomicBool::new(false),
-            theremin_allowed: params.theremin.enabled && params.audio.enabled,
+            theremin_allowed: params.theremin.enabled && params.audio.playback_enabled(),
             chorale_accepted: params.chorale.accept,
             mode: AtomicU8::new(mode_code(params.policy.mode)),
             fallen: AtomicBool::new(false),
@@ -1662,7 +1665,7 @@ impl WaitingVoice {
     /// `None` when audio is off — the IPC refuses sounds then anyway — or the thread will not
     /// start, which only costs the sounds until the bus is up.
     fn start(params: &Params, intents: Arc<Intents>) -> Option<Self> {
-        if !params.audio.enabled {
+        if !params.audio.playback_enabled() {
             return None;
         }
         // The same device choice the loop makes, so a board without the configured card plays
@@ -2663,7 +2666,7 @@ impl Background {
         // The speaker level, over whatever the board left (`aic3104-init.service` runs before this unit
         // and sets the HAT codec's full level). On the configured card, or the board's own codec where
         // it fell back to `default` — the face board's RK809 (`SpeakerCodec`).
-        if params.audio.enabled
+        if params.audio.playback_enabled()
             && let Some(mixer) = params.audio.speaker_mixer(&cards)
         {
             match robotd_params::set_speaker_volume(&mixer, params.audio.volume) {
@@ -2675,20 +2678,20 @@ impl Background {
                 Err(e) => tracing::warn!(error = %e, "could not set the speaker level"),
             }
         }
-        if params.audio.enabled
+        if params.audio.playback_enabled()
             && let Some(card) = &audio.missing_card
         {
             tracing::info!(
                 configured = %params.audio.device,
                 missing = %card,
-                "no such sound card; playing and recording on ALSA's default"
+                "legacy audio device card absent; unset selectors use ALSA default"
             );
         }
         let voice = params
             .audio
-            .enabled
+            .playback_enabled()
             .then(|| sound::Sound::new(params.audio.bank.clone(), audio.playback.clone()));
-        let pet: Option<pet_detect::worker::PetHandle> = if params.audio.enabled
+        let pet: Option<pet_detect::worker::PetHandle> = if params.audio.capture_enabled()
             && params.audio.pet_detect_resolved(params.policy.mode)
             && let Some(model) = params.audio.pet_model_resolved()
             && model.exists()
@@ -2729,7 +2732,7 @@ impl Background {
         // What the microphone heard, for `robot.state.hearing`: petting as a level, noises and voices
         // as counters, so a subscriber that missed a frame still sees that something happened.
         let hearing = proto::HearingState::default();
-        let theremin = (params.theremin.enabled && params.audio.enabled).then(|| {
+        let theremin = (params.theremin.enabled && params.audio.playback_enabled()).then(|| {
             theremin::Theremin::spawn(params.theremin.socket.clone(), params.theremin.hand())
         });
         // Laser tracking. The reader holds no connection to `mediad` while tracking is off, so on a
@@ -3048,7 +3051,7 @@ async fn run_io_session<T: RobotIo>(
 
     // The chorale. Off unless the config opted in — see `[chorale] accept`, and note that off
     // means putting nothing on the air rather than declining politely.
-    let mut chorale = (params.chorale.accept && params.audio.enabled)
+    let mut chorale = (params.chorale.accept && params.audio.playback_enabled())
         .then(|| {
             let personality = voice.as_mut().and_then(|v| v.personality())?;
             // `DUCK_CHORALE_PIECE=<id>` pins the conductor's pick — a bench lever for testing
@@ -5671,6 +5674,8 @@ async fn handle(
                 "robot.modelApi",
                 "robot.hardware",
                 "robot.setHardware",
+                "robot.peripherals",
+                "robot.setPeripherals",
                 "robot.skills",
             ];
             if !allowed.contains(&request.method.as_str()) {
@@ -6182,7 +6187,7 @@ fn volume_now(config: &std::path::Path) -> Result<proto::VolumeResult, String> {
 
 /// This board's speaker mixer, when it has one this build can drive and audio is on.
 fn speaker_mixer(audio: &params::AudioParams) -> Option<params::SpeakerMixer> {
-    if !audio.enabled {
+    if !audio.playback_enabled() {
         return None;
     }
     audio.speaker_mixer(&robotd_params::alsa_card_ids(
@@ -6447,6 +6452,18 @@ fn dispatch(
     call: &proto::Call,
 ) -> proto::Response {
     match call {
+        proto::Call::RobotPeripherals => match peripherals::report(state) {
+            Ok(result) => proto::Response::ok(Some(id), &result),
+            Err(e) => {
+                proto::Response::err(Some(id), proto::Error::new(proto::code::INTERNAL_ERROR, e))
+            }
+        },
+        proto::Call::RobotSetPeripherals(p) => match peripherals::save(state, p) {
+            Ok(result) => proto::Response::ok(Some(id), &result),
+            Err(e) => {
+                proto::Response::err(Some(id), proto::Error::new(proto::code::INVALID_PARAMS, e))
+            }
+        },
         proto::Call::RobotHardware => match hardware_report(state) {
             Ok(result) => proto::Response::ok(Some(id), &result),
             Err(e) => {
@@ -6738,6 +6755,7 @@ fn dispatch(
         proto::Call::RobotPolicies => proto::Response::ok(
             Some(id),
             &proto::PoliciesResult {
+                control_enabled: Some(intents.enabled()),
                 mode: mode_of(state.mode.load(Ordering::Relaxed))
                     .as_str()
                     .to_owned(),
@@ -10991,6 +11009,11 @@ mod tests {
         };
 
         s.homed.store(false, Ordering::Relaxed);
+        assert_eq!(read(&s).control_enabled, Some(false));
+        intents.set_enabled(true);
+        assert_eq!(read(&s).control_enabled, Some(true));
+        intents.request_relax();
+        assert_eq!(read(&s).control_enabled, Some(false));
         assert_eq!(
             read(&s).homed,
             Some(false),
