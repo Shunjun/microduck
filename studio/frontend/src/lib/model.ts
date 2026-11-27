@@ -78,7 +78,7 @@ export interface Manifest {
   kind: string
   duration_s?: number | null
   slot?: string
-  command: { idle: unknown }
+  command: { idle: unknown; encoding?: string }
   unwind_s?: number
   chain?: unknown
   action_scale?: unknown
@@ -97,6 +97,7 @@ export interface Skills {
 export interface Policy {
   slot: string
   path: string | null
+  overridden?: boolean
   error?: string
 }
 

@@ -8,6 +8,9 @@ struct Args {
     robot_socket: std::path::PathBuf,
     #[arg(long, default_value = "/var/lib/microduck-studio/actions")]
     library_dir: std::path::PathBuf,
+    /// Local mediad signalling endpoint (literal loopback IP and port only).
+    #[arg(long, default_value = "ws://127.0.0.1:8443")]
+    media_signalling_url: studio::MediaSignallingUrl,
 }
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -20,7 +23,11 @@ async fn main() -> std::io::Result<()> {
     );
     axum::serve(
         listener,
-        studio::app_with_library(args.robot_socket, std::path::absolute(args.library_dir)?),
+        studio::app_with_options(
+            args.robot_socket,
+            std::path::absolute(args.library_dir)?,
+            args.media_signalling_url,
+        ),
     )
     .with_graceful_shutdown(async {
         let _ = tokio::signal::ctrl_c().await;

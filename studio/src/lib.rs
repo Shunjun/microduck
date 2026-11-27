@@ -2,6 +2,7 @@
 mod library;
 pub mod rpc;
 mod session;
+mod video;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
@@ -14,18 +15,28 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
+pub use video::MediaSignallingUrl;
 pub struct AppState {
     pub socket: PathBuf,
     pub library: PathBuf,
+    pub media_signalling_url: MediaSignallingUrl,
     pub library_lock: Mutex<()>,
 }
 pub fn app(socket: PathBuf) -> Router {
     app_with_library(socket, PathBuf::from("/var/lib/microduck-studio/actions"))
 }
 pub fn app_with_library(socket: PathBuf, library: PathBuf) -> Router {
+    app_with_options(socket, library, MediaSignallingUrl::default())
+}
+pub fn app_with_options(
+    socket: PathBuf,
+    library: PathBuf,
+    media_signalling_url: MediaSignallingUrl,
+) -> Router {
     let state = Arc::new(AppState {
         socket,
         library,
+        media_signalling_url,
         library_lock: Mutex::new(()),
     });
     let router = Router::new().route(
@@ -62,6 +73,7 @@ pub fn app_with_library(socket: PathBuf, library: PathBuf) -> Router {
         )
         .route("/api/debug", post(debug))
         .route("/api/session", get(session::upgrade))
+        .route("/api/video", get(video::upgrade))
         .route(
             "/api/actions",
             get(library::list)

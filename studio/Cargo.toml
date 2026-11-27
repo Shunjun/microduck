@@ -10,6 +10,8 @@ axum = { version = "0.8.9", default-features = false, features = ["http1", "toki
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal"] }
 clap = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+futures-util = "0.3.33"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
 sha2 = "0.11.0"
 duck-control = { path = "../duck-control" }
 duck-ipc-proto = { path = "../duck-ipc-proto" }

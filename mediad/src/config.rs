@@ -42,6 +42,20 @@ pub fn load(path: &Path, explicit: bool) -> Params {
     }
 }
 
+/// Explicit launch overrides win. None means no source, even when test/sim video was requested.
+pub fn camera_device<'a>(
+    media: &'a robotd_params::MediaParams,
+    launch_override: Option<&'a str>,
+) -> Option<&'a str> {
+    match launch_override
+        .or(media.camera_device.as_deref())
+        .unwrap_or("/dev/video0")
+    {
+        "none" => None,
+        device => Some(device),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,6 +65,21 @@ mod tests {
         let path = dir.join("robotd.toml");
         std::fs::write(&path, text).expect("writes");
         path
+    }
+
+    #[test]
+    fn camera_none_and_launch_override_have_explicit_precedence() {
+        let mut media = MediaParams::default();
+        assert_eq!(camera_device(&media, None), Some("/dev/video0"));
+        media.camera_device = Some("none".into());
+        media.source = MediaSource::Test;
+        assert_eq!(camera_device(&media, None), None);
+        assert_eq!(
+            camera_device(&media, Some("/dev/video3")),
+            Some("/dev/video3")
+        );
+        media.camera_device = Some("/dev/video4".into());
+        assert_eq!(camera_device(&media, Some("none")), None);
     }
 
     /// The section is read, and one key set does not disturb the rest.

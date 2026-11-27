@@ -902,9 +902,23 @@ pub const REGISTRY: &[Entry] = &[
     feature(
         "audio.enabled",
         Kind::Bool,
-        "The voice and the microphone; off walks identically and stays quiet",
+        "Legacy audio default; explicit microphone and speaker selectors take priority",
     ),
-    entry("audio.device", Kind::Text, "ALSA playback device"),
+    entry(
+        "audio.microphone_device",
+        Kind::OptionalPath,
+        "Capture PCM; none disables capture",
+    ),
+    entry(
+        "audio.speaker_device",
+        Kind::OptionalPath,
+        "Playback PCM; none disables playback",
+    ),
+    entry(
+        "audio.device",
+        Kind::Text,
+        "Legacy shared ALSA device; independent selectors take priority",
+    ),
     entry("audio.bank", Kind::Text, "Voice bank directory"),
     feature(
         "audio.greet",
@@ -943,6 +957,11 @@ pub const REGISTRY: &[Entry] = &[
         "Your own emotions, on top of the shipped set: <name>.json + <name>.wav",
     ),
     // ── [media] ──────────────────────────────────────────────────────────────
+    entry(
+        "media.camera_device",
+        Kind::OptionalPath,
+        "Capture node; none disables camera",
+    ),
     feature(
         "media.source",
         Kind::Choice(crate::MEDIA_SOURCE_LABELS),

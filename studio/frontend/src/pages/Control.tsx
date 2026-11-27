@@ -40,7 +40,7 @@ function CameraView() {
       />
       {status !== '摄像头已连接' && (
         <div className="absolute inset-0 grid place-content-center bg-stage p-4 text-center">
-          <Blank title={status}>需要运行 mediad，信令地址可在配置中设置。</Blank>
+          <Blank title={status}>请检查本设备的摄像头与视频服务是否就绪。</Blank>
           <Button className="mx-auto" onClick={connect}>
             <Camera data-icon="inline-start" />
             连接 / 重试

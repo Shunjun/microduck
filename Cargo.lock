@@ -5419,10 +5419,12 @@ dependencies = [
  "clap",
  "duck-control",
  "duck-ipc-proto",
+ "futures-util",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "tower",
 ]
 

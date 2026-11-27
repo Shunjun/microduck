@@ -22,6 +22,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { PolicyBindings } from '@/components/PolicyBindings'
 import {
   Blank,
   Choice,
@@ -195,9 +197,13 @@ function Editor({ entry, close, saved }: EditorProps) {
                   kind,
                   duration_s: kind === 'perpetual' ? null : data?.duration_s,
                   slot: kind === 'episodic' ? undefined : data?.slot,
+                  command: { ...data?.command, idle: data?.command?.idle ?? [0, 0, 0], encoding: 'constant' },
                 })
               }
             />
+            {data?.kind === 'episodic' && <Choice label="适用策略（可选）" value={data.slot || 'none'} options={[
+              ['none', '通用单次动作'], ['kick_left', '左脚踢球'], ['kick_right', '右脚踢球'], ['roulade', '前滚翻'],
+            ]} onChange={(value) => patch({ slot: value === 'none' ? undefined : value })} />}
             {data?.kind === 'episodic' ? (
               <TextField
                 label="持续时间（秒）"
@@ -221,8 +227,10 @@ function Editor({ entry, close, saved }: EditorProps) {
                   ['none', '不指定'],
                   ['walk', 'walk / 行走'],
                   ['stand', 'stand / 站立'],
+                  ['sitstand', 'sitstand / 坐下与起立'],
+                  ['ground_pick', 'ground_pick / 地面拾取'],
                 ]}
-                onChange={(v) => patch({ slot: v === 'none' ? undefined : v })}
+                onChange={(v) => patch({ slot: v === 'none' ? undefined : v, command: { ...data?.command, idle: data?.command?.idle ?? [0, 0, 0], encoding: v === 'ground_pick' ? 'phase' : v === 'sitstand' ? 'posture_flag' : 'constant' } })}
               />
             )}
             <Field>
@@ -254,6 +262,7 @@ function Editor({ entry, close, saved }: EditorProps) {
 }
 
 export function Actions() {
+  const [section, setSection] = useState('policies')
   const ready = useConnected()
   const [entries, setEntries] = useState<Entry[] | null>(null)
   const [skills, setSkills] = useState<Skills | null>(null)
@@ -285,8 +294,10 @@ export function Actions() {
   }, [revision])
   useEffect(() => {
     let live = true
-    setSkills(null)
-    setPolicies(null)
+    if (!ready) {
+      setSkills(null)
+      setPolicies(null)
+    }
     setSkillsError('')
     if (ready)
       Promise.all([robot.request<Skills>('robot.skills'), robot.request<Policies>('robot.policies')])
@@ -296,14 +307,20 @@ export function Actions() {
         .catch((e) => {
           if (live) setSkillsError(message(e))
         })
+    const timer = ready ? setInterval(() => {
+      robot.request<Policies>('robot.policies').then((loaded) => {
+        if (live) setPolicies(loaded)
+      }).catch((error) => { if (live) setSkillsError(message(error)) })
+    }, 2000) : undefined
     return () => {
       live = false
+      clearInterval(timer)
     }
   }, [ready, revision])
   async function activate(entry: Entry) {
     const m = entry.manifest
     if (m.kind === 'perpetual') {
-      location.hash = 'settings/policies'
+      setSection('policies')
       return
     }
     if (await confirm('注册「' + m.name + '」？', '运行端配置将更新，可能触发重新就位。'))
@@ -333,12 +350,16 @@ export function Actions() {
         .toLowerCase()
         .includes(search.toLowerCase()),
   )
-  const available = skills ? skillEntries(skills) : []
+  const strategySkills = new Set(['sit_toggle', 'ground_pick', 'kick_left', 'kick_right', 'roulade'])
+  const available = skills ? skillEntries(skills).filter((skill) => !strategySkills.has(skill.name)) : []
   return (
     <div className="flex flex-col gap-5">
       <Heading section="RL 动作 / 本机动作库" title="小鸭的动作收藏。">
         导入训练模型，编辑说明，再选择注册或绑定。
       </Heading>
+      <Tabs value={section} onValueChange={setSection}>
+        <TabsList><TabsTrigger value="policies">策略</TabsTrigger><TabsTrigger value="models">模型</TabsTrigger></TabsList>
+        <TabsContent value="models" className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center gap-2">
         <span className="mr-auto text-sm text-muted-foreground">
           {entries ? '已导入 ' + entries.length + ' 个模型' : '读取本机动作库'}
@@ -405,7 +426,7 @@ export function Actions() {
                     查看 / 编辑
                   </Button>
                   <Button variant="link" onClick={() => activate(entry)}>
-                    {entry.manifest.kind === 'episodic' ? '注册动作' : '前往策略配置'}
+                    {entry.manifest.kind === 'episodic' ? '注册动作' : '绑定策略'}
                   </Button>
                 </CardFooter>
               </Card>
@@ -418,7 +439,12 @@ export function Actions() {
               : '准备 .onnx 和配套 manifest.json，开始添加第一个动作。'}
           </Blank>
         ))}
-      <Panel title="运行端已配置动作" description="配置记录不代表模型已加载。策略与实时反馈就绪后才可试运行，试运行会驱动实物。">
+        </TabsContent>
+        <TabsContent value="policies" className="flex flex-col gap-5">
+          <div className="flex justify-end"><Button variant="outline" onClick={refresh}><RefreshCw data-icon="inline-start" />刷新</Button></div>
+          <Problem>{libraryError}</Problem>
+          <PolicyBindings entries={entries ?? []} policies={policies} refresh={refresh} />
+      <Panel title="其他动作" description="自定义动作和其他运行端动作。固定策略在上方选择模型并试运行。">
         <Problem>{skillsError}</Problem>
         {skills ? (
           available.length ? (
@@ -479,6 +505,8 @@ export function Actions() {
           !skillsError && <p className="text-sm text-muted-foreground">等待读取运行端动作…</p>
         )}
       </Panel>
+        </TabsContent>
+      </Tabs>
       {editor !== undefined && (
         <Editor
           entry={editor}

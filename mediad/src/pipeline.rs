@@ -200,6 +200,8 @@ pub struct Settings {
 /// Where the video comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
+    /// An idle source that produces no frames and opens no camera or simulator.
+    Disabled,
     /// A test pattern. Works with no camera attached, which is what makes a session testable
     /// before the capture path exists.
     Test,
@@ -455,6 +457,12 @@ pub fn start(
     let pipeline = gst::Pipeline::new();
 
     let src = match &source {
+        Source::Disabled => {
+            let src = make("appsrc")?;
+            src.set_property("is-live", true);
+            src.set_property("format", gst::Format::Time);
+            src
+        }
         Source::Test => {
             let src = make("videotestsrc")?;
             // `is-live` so the pipeline behaves like a camera does rather than racing ahead of

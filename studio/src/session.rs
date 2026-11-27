@@ -45,6 +45,8 @@ pub(crate) fn allowed(value: &Value) -> bool {
                     | "robot.removeSkill"
                     | "robot.hardware"
                     | "robot.setHardware"
+                    | "robot.peripherals"
+                    | "robot.setPeripherals"
             )
         )
 }
@@ -105,6 +107,8 @@ mod tests {
             "robot.subscribe",
             "robot.skills",
             "robot.stop",
+            "robot.peripherals",
+            "robot.setPeripherals",
         ] {
             assert!(allowed(&json!({"jsonrpc":"2.0", "method":method})));
         }

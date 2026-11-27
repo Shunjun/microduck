@@ -59,7 +59,7 @@ async function start(extra = []) {
     catch { connection.destroy(); return false; }
   }, 'fake IPC socket never appeared');
   socket.on('data', data);
-  await call('hello', { api_version: 72, client: 'studio-commissioning-test' });
+  await call('hello', { api_version: 73, client: 'studio-commissioning-test' });
 }
 const debug = (op, fields = {}) => call('robot.servoDebug', { op, ...fields });
 

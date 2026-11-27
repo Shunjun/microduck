@@ -32,21 +32,35 @@ pub fn validate_manifest(m: &Value) -> Result<(), String> {
     if !matches!(m["model_api"].as_u64(), Some(1 | 2)) {
         return Err("不支持该 model_api（支持 1、2）".into());
     }
-    if m["command"]["encoding"] != "constant" {
-        return Err(
-            "第一版导入支持 constant 指令编码；phase/posture_flag 不可作为通用动作导入".into(),
-        );
+    let expected_encoding = match (m["kind"].as_str(), m["slot"].as_str()) {
+        (Some("perpetual"), Some("sitstand")) => "posture_flag",
+        (Some("perpetual"), Some("ground_pick")) => "phase",
+        _ => "constant",
+    };
+    if m["command"]["encoding"] != expected_encoding {
+        return Err(format!("该策略需要 {expected_encoding} 指令编码"));
     }
     match m["kind"].as_str() {
         Some("episodic") => {
             bounded_number(&m["duration_s"], "duration_s", 0.0, 600.0)?;
+            if !m["slot"].is_null()
+                && !matches!(
+                    m["slot"].as_str(),
+                    Some("kick_left" | "kick_right" | "roulade")
+                )
+            {
+                return Err("单次动作槽位需为 kick_left、kick_right 或 roulade".into());
+            }
         }
         Some("perpetual") => {
             if !m["duration_s"].is_null() {
                 return Err("持续策略不应声明 duration_s".into());
             }
-            if !matches!(m["slot"].as_str(), Some("walk" | "stand")) {
-                return Err("第一版持续策略需指定 walk 或 stand 槽位".into());
+            if !matches!(
+                m["slot"].as_str(),
+                Some("walk" | "stand" | "sitstand" | "ground_pick")
+            ) {
+                return Err("持续策略需指定 walk、stand、sitstand 或 ground_pick 槽位".into());
             }
         }
         _ => return Err("kind 必须为 episodic 或 perpetual".into()),
@@ -287,6 +301,29 @@ mod tests {
             assert!(validate_manifest(&m).is_err());
         }
         assert!(valid_id("../../etc/robot").is_err());
+    }
+    #[test]
+    fn policy_slots_require_their_own_command_encoding() {
+        for (slot, encoding) in [
+            ("walk", "constant"),
+            ("stand", "constant"),
+            ("sitstand", "posture_flag"),
+            ("ground_pick", "phase"),
+        ] {
+            let mut m = manifest();
+            m["kind"] = json!("perpetual");
+            m["slot"] = json!(slot);
+            m["duration_s"] = Value::Null;
+            m["command"]["encoding"] = json!(encoding);
+            assert!(validate_manifest(&m).is_ok(), "{slot}");
+            m["command"]["encoding"] = json!("wrong");
+            assert!(validate_manifest(&m).is_err());
+        }
+        let mut m = manifest();
+        m["slot"] = json!("kick_left");
+        assert!(validate_manifest(&m).is_ok());
+        m["slot"] = json!("sitstand");
+        assert!(validate_manifest(&m).is_err());
     }
     #[test]
     fn import_is_atomic_and_preserves_unknown_manifest_fields() {

@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react'
+import type { SettingsSectionHandle } from './HardwareSettings'
 import { LockKeyhole, RefreshCw } from 'lucide-react'
 import { FieldGroup } from '@/components/ui/field'
+import { DevicePicker } from '@/components/DevicePicker'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import type { Hardware } from '@/lib/model'
@@ -18,14 +20,17 @@ interface HardwareFormProps {
   refresh: () => Promise<void>
   wizard?: boolean
   onPending?: (pending: boolean) => void
+  ref?: Ref<SettingsSectionHandle>
+  onSave?: () => void
 }
-export function HardwareForm({ info, refresh, wizard = false, onPending }: HardwareFormProps) {
+export function HardwareForm({ info, refresh, wizard = false, onPending, ref, onSave }: HardwareFormProps) {
   const [driver, setDriver] = useState(info.configured_driver)
   const [port, setPort] = useState(info.configured_port)
   const [normal, setNormal] = useState(String(info.normal_p))
   const [limp, setLimp] = useState(String(info.limp_p))
   const [busy, setBusy] = useState(false)
   const { act } = useFeedback()
+  const form = useRef<HTMLFormElement>(null)
   const maxP = driver === 'feetech1910' ? 254 : 16383
   const dirty =
     driver !== info.configured_driver ||
@@ -33,16 +38,25 @@ export function HardwareForm({ info, refresh, wizard = false, onPending }: Hardw
   useEffect(() => {
     onPending?.(busy || dirty)
   }, [onPending, busy, dirty])
+  function prepareSave() {
+    if (!form.current?.reportValidity()) throw Error('请检查舵机配置的输入值。')
+    const fields: Record<string, unknown> = { servo_driver: driver }
+    if (!info.port_override && port.trim() !== info.configured_port) fields.port = port.trim()
+    if (!wizard) {
+      fields.normal_p = Number(normal)
+      fields.limp_p = Number(limp)
+    }
+    return async () => { await robot.request('robot.setHardware', fields) }
+  }
+  useImperativeHandle(ref, () => ({
+    prepareSave,
+    refresh,
+    isDirty: () => dirty || (!wizard && (Number(normal) !== info.normal_p || Number(limp) !== info.limp_p)),
+  }))
   async function save() {
     setBusy(true)
     await act(async () => {
-      const fields: Record<string, unknown> = { servo_driver: driver }
-      if (!info.port_override && port.trim() !== info.configured_port) fields.port = port.trim()
-      if (!wizard) {
-        fields.normal_p = Number(normal)
-        fields.limp_p = Number(limp)
-      }
-      await robot.request('robot.setHardware', fields)
+      await prepareSave()()
       await refresh()
     }, '配置已保存。总线是否就绪请查看连接状态。')
     setBusy(false)
@@ -53,9 +67,11 @@ export function HardwareForm({ info, refresh, wizard = false, onPending }: Hardw
       description="同一驱动下，变更端口或运行增益会停止运动并重连。更换驱动时，本次硬件配置一起在重启后生效。运动始终需要另行启用。"
     >
       <form
+        ref={form}
         onSubmit={(e) => {
           e.preventDefault()
-          void save()
+          if (onSave) onSave()
+          else void save()
         }}
       >
         <FieldGroup>
@@ -69,13 +85,14 @@ export function HardwareForm({ info, refresh, wizard = false, onPending }: Hardw
                 ['xl330', 'Dynamixel XL330'],
               ]}
             />
-            <TextField
-              label="串口路径"
-              required
+            <DevicePicker
+              label="串口"
+              value={info.port_override ? info.effective_port : port}
+              onChange={setPort}
+              options={info.ports.map((entry) => ({ id: entry.path, label: entry.path, available: entry.accessible }))}
               disabled={info.port_override}
-              value={info.port_override ? info.configured_port : port}
-              onChange={(e) => setPort(e.target.value)}
-              placeholder="/dev/ttyUSB0"
+              placeholder="选择或输入串口路径"
+              hint={info.port_override ? undefined : '选择检测到的串口，或直接输入设备路径。'}
             />
           </div>
           {info.port_override ? (
@@ -83,24 +100,7 @@ export function HardwareForm({ info, refresh, wizard = false, onPending }: Hardw
               <LockKeyhole size={16} />
               启动参数 --port 已锁定串口，当前使用 {info.effective_port}。
             </p>
-          ) : (
-            info.ports.length > 0 && (
-              <Choice
-                label="检测到的串口"
-                value={info.ports.some((p) => p.path === port) ? port : 'manual'}
-                onChange={(v) => {
-                  if (v !== 'manual') setPort(v)
-                }}
-                options={[
-                  ['manual', '手动输入路径'],
-                  ...info.ports.map(
-                    (p) =>
-                      [p.path, p.path + (p.accessible ? '' : '（不可访问）')] as [string, string],
-                  ),
-                ]}
-              />
-            )
-          )}
+          ) : null}
           {!wizard && (
             <div className="grid gap-4 sm:grid-cols-2">
               <TextField
@@ -131,30 +131,17 @@ export function HardwareForm({ info, refresh, wizard = false, onPending }: Hardw
               />
             </div>
           )}
-          <div className="flex flex-wrap items-center gap-2">
-            <Button disabled={busy} type="submit">
+          {!onSave && <div className="flex flex-wrap items-center gap-2">
+            {!onSave && <Button disabled={busy} type="submit">
               保存硬件配置
-            </Button>
+            </Button>}
             <Button type="button" variant="outline" onClick={() => refresh()}>
               <RefreshCw data-icon="inline-start" />
               刷新状态
             </Button>
-          </div>
+          </div>}
         </FieldGroup>
       </form>
-      <dl className="mt-5 grid grid-cols-2 gap-3 text-sm">
-        {[
-          ['已保存端口', info.configured_port],
-          ['实际使用端口', info.effective_port],
-          ['已保存驱动', info.configured_driver],
-          ['运行中驱动', info.active_driver],
-        ].map(([key, v]) => (
-          <div key={key}>
-            <dt className="text-xs text-muted-foreground">{key}</dt>
-            <dd className="break-all font-mono">{v || '未配置'}</dd>
-          </div>
-        ))}
-      </dl>
       <div className="mt-3 flex flex-col items-start gap-2">
         <Badge variant="secondary">总线 · {busNames[info.bus_status] || info.bus_status}</Badge>
         {info.restart_required && (
