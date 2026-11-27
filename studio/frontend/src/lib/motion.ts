@@ -26,11 +26,11 @@ export function normalize(x: number, y: number) {
   return { x: x / radius, y: y / radius }
 }
 
-export function velocityFor(x: number, y: number, speed: number, prefs: Preferences) {
+export function velocityFor(x: number, y: number, speed: number, prefs: Preferences, strafe = 0) {
   const point = normalize(x, y)
   return {
     vx: ((-point.y * speed) / 100) * prefs.forward,
-    vy: 0,
+    vy: strafe === 0 ? 0 : ((-Math.max(-1, Math.min(1, strafe)) * speed) / 100) * Math.min(prefs.forward, 0.3),
     vyaw: ((-point.x * speed) / 100) * prefs.turn,
   }
 }

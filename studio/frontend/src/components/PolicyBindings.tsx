@@ -3,6 +3,7 @@ import { robot, useConnected } from '@/lib/api'
 import type { Entry, Policies, Policy } from '@/lib/model'
 import { modelsForSlot, policySlots, trialSkill } from '@/lib/policy-slots'
 import { preferences } from '@/lib/motion'
+import { actionName } from '@/lib/action-name'
 import { Joystick } from './Joystick'
 import { Choice, Panel, Problem, useFeedback } from './StudioUI'
 import { Button } from './ui/button'
@@ -65,7 +66,7 @@ function PolicyRow({ policy, entries, enabled, refresh, trial }: PolicyRowProps)
           <Choice label={(definition?.[1] ?? policy.slot) + '使用的模型'} compact value={value} disabled={busy || !ready} onChange={(path) => void bind(path)} options={[
             ['default', '使用项目默认模型'],
             ...(value === 'current' ? [['current', '当前设备模型'] as [string, string]] : []),
-            ...models.map((model) => [model.path, model.manifest.name] as [string, string]),
+            ...models.map((model) => [model.path, actionName(model)] as [string, string]),
           ]} />
         </div>
         <Button size="sm" variant="outline" disabled={busy || !enabled || !ready || !policy.path || !!policy.error} onClick={() => trial(policy.slot)}>试运行</Button>

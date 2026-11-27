@@ -6755,6 +6755,7 @@ fn dispatch(
         proto::Call::RobotPolicies => proto::Response::ok(
             Some(id),
             &proto::PoliciesResult {
+                control_enabled: Some(intents.enabled()),
                 mode: mode_of(state.mode.load(Ordering::Relaxed))
                     .as_str()
                     .to_owned(),
@@ -11008,6 +11009,11 @@ mod tests {
         };
 
         s.homed.store(false, Ordering::Relaxed);
+        assert_eq!(read(&s).control_enabled, Some(false));
+        intents.set_enabled(true);
+        assert_eq!(read(&s).control_enabled, Some(true));
+        intents.request_relax();
+        assert_eq!(read(&s).control_enabled, Some(false));
         assert_eq!(
             read(&s).homed,
             Some(false),

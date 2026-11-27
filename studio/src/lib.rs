@@ -84,6 +84,14 @@ pub fn app_with_options(
             "/api/actions/{id}/manifest",
             put(library::edit).layer(DefaultBodyLimit::max(65536)),
         )
+        .route(
+            "/api/actions/{id}/favorite",
+            put(library::favorite).layer(DefaultBodyLimit::max(1024)),
+        )
+        .route(
+            "/api/actions/{id}/alias",
+            put(library::alias).layer(DefaultBodyLimit::max(1024)),
+        )
         .layer(DefaultBodyLimit::max(16384))
         .with_state(state)
 }
@@ -207,6 +215,62 @@ mod tests {
         assert!(same_origin(&h, true).is_err());
         h.remove("origin");
         assert!(same_origin(&h, false).is_err());
+    }
+    #[tokio::test]
+    async fn favorite_route_persists_and_rejects_cross_site_changes() {
+        use axum::{
+            body::{Body, to_bytes},
+            http::Request,
+        };
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("actions");
+        let id = "a".repeat(64);
+        let model = root.join(&id);
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("policy.onnx"), b"test model").unwrap();
+        std::fs::write(
+            model.join("manifest.json"),
+            br#"{"name":"wave","kind":"episodic"}"#,
+        )
+        .unwrap();
+        let app = app_with_library(dir.path().join("absent.sock"), root);
+        for (origin, expected) in [
+            ("https://other.example", StatusCode::FORBIDDEN),
+            ("http://localhost", StatusCode::OK),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/actions/{id}/favorite"))
+                        .header("origin", origin)
+                        .header("host", "localhost")
+                        .header("x-studio", "1")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"favorite":true}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if expected == StatusCode::FORBIDDEN {
+                assert!(!model.join("studio.json").exists());
+            }
+        }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/actions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let value: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(value["entries"][0]["favorite"], true);
     }
     #[tokio::test]
     async fn serves_assets_bounds_uploads_and_rejects_cross_site_mutations() {

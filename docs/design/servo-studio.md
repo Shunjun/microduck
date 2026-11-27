@@ -70,7 +70,13 @@ mediad 的 unit 改放在 `optional-systemd/`，避免自动启用或在每次�
 
 `studio/src/library.rs` 唯一管理上传文件。默认 `/var/lib/microduck-studio/actions`，可由 `--library-dir` 指定；unit 使用 `StateDirectory=microduck-studio` 提供目录写权限，保持 ProtectSystem 等限制。robotd 读取世界可读的模型，网页服务没有舵机或配置目录写权限。
 
-导入必须同时选择 `.onnx` 和 `manifest.json`。页面显示名称、描述、类型、时长、持续策略槽位，并支持完整 JSON 编辑；未识别字段原样保留。支持 constant 编码的 episodic 动作和 walk/stand perpetual 策略。详细 manifest 契约归 [policy-manifest.md](../policy-manifest.md) 所有。
+导入必须同时选择 `.onnx` 和 `manifest.json`。页面显示名称、描述、类型、时长、适用策略，并支持完整 JSON 编辑；未识别字段原样保留。支持 constant 编码的 episodic 动作、walk/stand perpetual 策略、posture_flag 编码的 sitstand 和 phase 编码的 ground_pick。单次动作可选 kick_left、kick_right 或 roulade 槽位；持续策略必须声明适用槽位。详细 manifest 契约归 [policy-manifest.md](../policy-manifest.md) 所有。
+
+策略绑定位于动作库「策略」页签，与「模型」列表分开。下拉框按槽位、类型和指令编码筛选，显示别名或模型名称，不显示设备路径。多个模型可以声明同一槽位，运行端一次绑定一个；更换需确认，等待运行端确认加载后才报告成功。
+
+单次动作收藏与所有模型的显示别名存放在各动作目录的 `studio.json`，由 `/api/actions/{id}/favorite` 和 `/api/actions/{id}/alias` 原子保存，使用与模型导入相同的同源限制和设备端互斥锁。两项互不覆盖，也不写入训练 manifest；空别名回退到原标识。操控页显示已收藏的模型，未注册或路径不匹配的动作禁用，调用仍发送原 manifest.name。
+
+操控页的启动开关读取 `robot.policies.control_enabled`，不以模型配置的 enabled 代替运行状态。开启调用 `robot.enable`，关闭调用 `robot.relax`；摇杆、平移和动作仅在控制开启且设备就绪时可用。固定动作与收藏动作分区，sit_toggle 按 sitting 状态显示坐下或起立。预览相机正俯仰表示地板上方，默认约 17°，可拖动范围 −30° 至 70°。
 
 HTTP API：`GET /api/actions` 列表；`POST /api/actions` 原子导入；`PUT /api/actions/{sha256}/manifest` 校验、备份并保存说明。导入 body 为 4 字节大端 JSON 长度、UTF-8 manifest、ONNX 三段，浏览器直接传 Blob，避免模型 Base64 膨胀。manifest 上限 64 KiB、ONNX 上限 32 MiB；不接收客户端路径。存储键为模型 SHA-256，同模型重复导入拒绝并提示编辑已有说明。先写暂存目录、调用既有 `duck_control::policy::validate` 验证 ONNX 接口，成功后原子发布；失败清理暂存，不生成已安装项。设备需要既有 ONNX Runtime；缺失时报告原因，不能跳过模型检查。
 
@@ -91,7 +97,7 @@ ALSA PCM 不进行缺卡回退。任一选择为 `none` 只关闭对应通路；
 `media.source` 设为 `camera`；仅修改音频或选择 `none` 不改写原有视频来源。
 
 列表来自 `/proc/asound/pcm`、声卡 ID 及 `/sys/class/video4linux` 元数据，不通过打开设备来探测；
-保留未枚举到的已选标识，并允许手动指定。列表中的 available 表示系统枚举存在，不保证可成功采集
+保留未枚举到的已选标识；网页音视频设备仅提供下拉选择，串口仍允许手动输入。列表中的 available 表示系统枚举存在，不保证可成功采集
 或播放。音量只写已支持的硬件混音器；无法驱动所选 PCM 的混音器时保存配置并明确提示。
 
 这些接口返回的是保存值，不是硬件已生效的断言。音频配置与 robotd 启动快照不同则列出 robotd

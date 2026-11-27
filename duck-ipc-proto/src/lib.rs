@@ -3775,6 +3775,9 @@ pub struct LoadPolicyParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PoliciesResult {
+    /// Current control intent, distinct from whether policy models are configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_enabled: Option<bool>,
     /// `"walk"` or `"roller"` — which mode's slot defaults are in play.
     pub mode: String,
     /// Whether policies are loaded at all (`[policy] enabled`). False is a legitimate bench

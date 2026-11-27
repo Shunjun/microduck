@@ -117,14 +117,33 @@ fn valid_id(id: &str) -> Result<(), String> {
         Err("无效的动作 ID".into())
     }
 }
+fn studio_metadata(dir: &FsPath) -> Result<Value, String> {
+    match fs::read(dir.join("studio.json")) {
+        Ok(bytes) => {
+            let metadata: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            if !metadata.is_object()
+                || !metadata["favorite"].is_boolean()
+                || (!metadata["alias"].is_null() && !metadata["alias"].is_string())
+            {
+                return Err("无效的动作显示配置".into());
+            }
+            Ok(metadata)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(json!({"favorite":false})),
+        Err(error) => Err(error.to_string()),
+    }
+}
 fn entry(root: &FsPath, id: &str) -> Result<Value, String> {
     valid_id(id)?;
     let dir = root.join(id);
     let manifest: Value =
         serde_json::from_slice(&fs::read(dir.join("manifest.json")).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
+    let metadata = studio_metadata(&dir)?;
+    let favorite = metadata["favorite"].as_bool().unwrap_or(false);
+    let alias = metadata["alias"].as_str().unwrap_or("");
     Ok(
-        json!({"id":id,"manifest":manifest,"path":dir.join("policy.onnx"),"bytes":fs::metadata(dir.join("policy.onnx")).map_err(|e|e.to_string())?.len()}),
+        json!({"id":id,"manifest":manifest,"favorite":favorite,"alias":alias,"path":dir.join("policy.onnx"),"bytes":fs::metadata(dir.join("policy.onnx")).map_err(|e|e.to_string())?.len()}),
     )
 }
 fn nonce() -> String {
@@ -157,6 +176,75 @@ fn atomic_json(path: &FsPath, value: &Value) -> Result<(), String> {
         let _ = fs::remove_file(temp);
     }
     result
+}
+fn set_favorite(root: &FsPath, id: &str, favorite: bool) -> Result<Value, String> {
+    let item = entry(root, id)?;
+    if item["manifest"]["kind"] != "episodic" {
+        return Err("持续策略请在策略页绑定；收藏用于单次动作".into());
+    }
+    let mut metadata = studio_metadata(&root.join(id))?;
+    metadata["favorite"] = json!(favorite);
+    atomic_json(&root.join(id).join("studio.json"), &metadata)?;
+    entry(root, id)
+}
+fn set_alias(root: &FsPath, id: &str, alias: &str) -> Result<Value, String> {
+    entry(root, id)?;
+    let alias = alias.trim();
+    if alias.chars().count() > 64 || alias.chars().any(char::is_control) {
+        return Err("别名最多 64 个字符，不能含控制字符".into());
+    }
+    let mut metadata = studio_metadata(&root.join(id))?;
+    metadata["alias"] = json!(alias);
+    atomic_json(&root.join(id).join("studio.json"), &metadata)?;
+    entry(root, id)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AliasParams {
+    alias: String,
+}
+
+pub async fn alias(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(params): Json<AliasParams>,
+) -> Response {
+    if let Err(error) = crate::same_origin(&headers, true) {
+        return crate::forbidden(error);
+    }
+    crate::blocking_response(
+        tokio::task::spawn_blocking(move || {
+            let _guard = state.library_lock.lock().map_err(|e| e.to_string())?;
+            set_alias(&state.library, &id, &params.alias)
+        })
+        .await,
+    )
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FavoriteParams {
+    favorite: bool,
+}
+
+pub async fn favorite(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(params): Json<FavoriteParams>,
+) -> Response {
+    if let Err(error) = crate::same_origin(&headers, true) {
+        return crate::forbidden(error);
+    }
+    crate::blocking_response(
+        tokio::task::spawn_blocking(move || {
+            let _guard = state.library_lock.lock().map_err(|e| e.to_string())?;
+            set_favorite(&state.library, &id, params.favorite)
+        })
+        .await,
+    )
 }
 fn import(
     root: &FsPath,
@@ -301,6 +389,48 @@ mod tests {
             assert!(validate_manifest(&m).is_err());
         }
         assert!(valid_id("../../etc/robot").is_err());
+    }
+    #[test]
+    fn favorites_persist_on_device_without_changing_training_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = manifest();
+        let imported = import(dir.path(), &envelope(&original, b"favorite-model"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        let id = imported["id"].as_str().unwrap();
+        assert_eq!(imported["favorite"], false);
+        assert_eq!(
+            set_favorite(dir.path(), id, true).unwrap()["favorite"],
+            true
+        );
+        assert_eq!(entry(dir.path(), id).unwrap()["manifest"], original);
+        assert_eq!(entry(dir.path(), id).unwrap()["favorite"], true);
+        let renamed = set_alias(dir.path(), id, " 挥挥手 ").unwrap();
+        assert_eq!(renamed["alias"], "挥挥手");
+        assert_eq!(renamed["favorite"], true);
+        assert_eq!(renamed["manifest"], original);
+        assert!(set_alias(dir.path(), id, &"字".repeat(65)).is_err());
+        assert!(set_alias(dir.path(), id, "挥\n手").is_err());
+        assert_eq!(entry(dir.path(), id).unwrap()["alias"], "挥挥手");
+        assert_eq!(
+            set_favorite(dir.path(), id, false).unwrap()["favorite"],
+            false
+        );
+        assert_eq!(entry(dir.path(), id).unwrap()["alias"], "挥挥手");
+        assert_eq!(set_alias(dir.path(), id, "").unwrap()["alias"], "");
+        assert_eq!(entry(dir.path(), id).unwrap()["favorite"], false);
+        assert!(set_favorite(dir.path(), "../../etc", true).is_err());
+        assert!(set_favorite(dir.path(), &"a".repeat(64), true).is_err());
+        let mut perpetual = original;
+        perpetual["kind"] = json!("perpetual");
+        perpetual["slot"] = json!("walk");
+        perpetual["duration_s"] = Value::Null;
+        let imported = import(dir.path(), &envelope(&perpetual, b"walking-model"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert!(set_favorite(dir.path(), imported["id"].as_str().unwrap(), true).is_err());
     }
     #[test]
     fn policy_slots_require_their_own_command_encoding() {
