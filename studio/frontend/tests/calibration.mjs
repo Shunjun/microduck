@@ -37,10 +37,20 @@ test('an unspecified direction or invalid interval cannot advance commissioning'
     { direction: 0 },
     { min_ticks: null },
     { min_ticks: 4095 },
-    { max_ticks: 4096 },
+    { max_ticks: 32768 },
     { min_ticks: 0.5 },
   ])
     assert.equal(jointLimits({ ...joint, ...fields }), false)
+})
+
+test('signed and accumulated position coordinates use the register range, not one turn', () => {
+  const signed = { ...joint, min_ticks: -32767, max_ticks: 32767, zero_ticks: -68 }
+  assert.equal(jointLimits(signed), true)
+  assert.equal(reusablePose({ ...complete, settings: complete.settings.map(j => ({ ...signed, id: j.id })) }), true)
+  assert.equal(jointLimits({ ...signed, min_ticks: -32768 }), false)
+  assert.equal(jointLimits({ ...signed, max_ticks: 32768 }), false)
+  const state = { settings: [signed], readings: [{ id: signed.id, ticks: -1092 }], reference: [0] }
+  assert.ok(Math.abs(debugPose(state, true).angles[0] - Math.PI / 2) < 1e-9)
 })
 
 test('a cold tty can reach Enter and Scan before its first successful read', () => {

@@ -67,6 +67,68 @@ fn joint(id: u8) -> JointCalibration {
         max_ticks: 3072,
     }
 }
+
+#[test]
+fn signed_targets_preserve_turns_and_encode_negative_direction_before_writing() {
+    let ids = [3, 8];
+    let mut mock = MockBus::identified(&ids);
+    mock.push(
+        Request::Write(ids.to_vec(), 42, vec![vec![0x44, 0x80], vec![0x62, 0x10]]),
+        Ok(vec![]),
+    );
+    let mut bus = FeetechBus::new(mock, ids.to_vec(), [1., 0., 0., 0.]).unwrap();
+    let calibration = [
+        JointCalibration {
+            id: 3,
+            zero_ticks: -68,
+            direction: 1,
+            min_ticks: -32767,
+            max_ticks: 32767,
+        },
+        JointCalibration {
+            id: 8,
+            zero_ticks: 4194,
+            direction: -1,
+            min_ticks: -32767,
+            max_ticks: 32767,
+        },
+    ];
+    // Reject the whole pose before any write; no clamp or modulo-4096 fallback.
+    assert!(bus.write_positions(&calibration, &[f64::NAN, 0.]).is_err());
+    assert!(bus.write_positions(&calibration, &[0., 100.]).is_err());
+    bus.write_positions(&calibration, &[0., 0.]).unwrap();
+    assert!(bus.bus.expected.is_empty());
+    let data = serde_json::to_value(&calibration[0]).unwrap();
+    let restored: JointCalibration = serde_json::from_value(data).unwrap();
+    assert_eq!(restored.zero_ticks, -68);
+}
+
+#[test]
+fn normal_control_reads_signed_and_multiturn_coordinates_without_wrapping() {
+    for (raw, zero, delta) in [(0x8044_u16, -68, 0), (0x1062, 4090, 104), (0x8069, 0, -105)] {
+        let ids: Vec<_> = (1..=NUM_JOINTS as u8).collect();
+        let mut mock = MockBus::identified(&ids);
+        let mut block = vec![0; 15];
+        block[..2].copy_from_slice(&raw.to_le_bytes());
+        mock.feedback(&ids, block, imu_sample(1));
+        let config = Config {
+            joints: std::array::from_fn(|i| JointCalibration {
+                id: ids[i],
+                zero_ticks: zero,
+                direction: 1,
+                min_ticks: -32767,
+                max_ticks: 32767,
+            }),
+            imu_mount: [1., 0., 0., 0.],
+            speed_rad_s_per_unit: 0.1,
+            current_ma_per_unit: 2.,
+        };
+        let mut io = FeetechIo::new(mock, config).unwrap();
+        let positions = io.read().unwrap().positions;
+        assert!((positions[0] - f64::from(delta) * std::f64::consts::TAU / 4096.).abs() < 1e-12);
+        assert!(io.bus.bus.expected.is_empty());
+    }
+}
 fn imu_sample(n: u8) -> Vec<u8> {
     let mut bytes = vec![0; 15];
     bytes[7] = 0x80;

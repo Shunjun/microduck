@@ -18,7 +18,7 @@ import type { DebugSession } from '@/lib/session'
 import type { Joint } from '@/lib/model'
 import { labels } from '@/lib/motion'
 import { PoseView } from './PoseView'
-import { canEditZero } from '@/lib/calibration'
+import { canEditZero, POSITION_MIN_TICKS, POSITION_MAX_TICKS } from '@/lib/calibration'
 
 interface SessionProps {
   session: DebugSession
@@ -223,8 +223,8 @@ export function JointTable({ session, selected, onSelect, edit = true, applied }
                       <TableCell key={key}>
                         <Input
                           type="number"
-                          min={0}
-                          max={4095}
+                          min={POSITION_MIN_TICKS}
+                          max={POSITION_MAX_TICKS}
                           step={1}
                           className="w-22"
                           density="compact"
@@ -294,8 +294,8 @@ export function JointZeroControl({ session, index, onIndex }: JointEditorProps) 
         label="软件零位（编码器计数）"
         disabled={zeroDisabled}
         type="number"
-        min={0}
-        max={4095}
+        min={POSITION_MIN_TICKS}
+        max={POSITION_MAX_TICKS}
         value={zero ?? j.zero_ticks ?? ''}
         onChange={(e) => setZero(e.target.value)}
         hint="先采集并保存标准姿态，再卸力逐颗微调。"
@@ -307,8 +307,8 @@ export function JointZeroControl({ session, index, onIndex }: JointEditorProps) 
           zero === null ||
           zero === '' ||
           !Number.isInteger(Number(zero)) ||
-          Number(zero) < 0 ||
-          Number(zero) > 4095
+          Number(zero) < POSITION_MIN_TICKS ||
+          Number(zero) > POSITION_MAX_TICKS
         }
         onClick={saveZero}
       >
@@ -326,8 +326,8 @@ export function JointEditor({ session, index, onIndex }: JointEditorProps) {
   const [p, setP] = useState(String(reading?.p ?? ''))
   const { act } = useFeedback()
   const disabled = busy || !state!.active
-  const min = j.min_ticks ?? 0,
-    max = j.max_ticks ?? 4095
+  const min = j.min_ticks ?? POSITION_MIN_TICKS,
+    max = j.max_ticks ?? POSITION_MAX_TICKS
   const validTicks =
     ticks !== '' && Number.isInteger(Number(ticks)) && Number(ticks) >= min && Number(ticks) <= max
   return (

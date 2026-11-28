@@ -40,7 +40,7 @@ pub enum Request {
     },
     Position {
         id: u8,
-        ticks: u16,
+        ticks: i32,
     },
     Torque {
         id: Option<u8>,
@@ -55,7 +55,7 @@ pub enum Request {
     },
     SetZero {
         id: u8,
-        ticks: u16,
+        ticks: i32,
     },
     Home,
     Capture,
@@ -266,7 +266,7 @@ pub struct Controller {
     status: Status,
     started: Instant,
     last_read: Option<Instant>,
-    samples: VecDeque<(Instant, [u16; NUM_JOINTS])>,
+    samples: VecDeque<(Instant, [i32; NUM_JOINTS])>,
     imu_samples: VecDeque<(Instant, duck_control::servo_debug::ImuReading)>,
     target: Option<[f64; NUM_JOINTS]>,
     follow_counts: [u8; NUM_JOINTS],
@@ -314,7 +314,7 @@ impl Controller {
         }
         Ok(())
     }
-    fn positions(&self) -> Result<[u16; NUM_JOINTS], String> {
+    fn positions(&self) -> Result<[i32; NUM_JOINTS], String> {
         if self
             .last_read
             .is_none_or(|t| t.elapsed() > Duration::from_secs(1))
@@ -441,12 +441,12 @@ impl Controller {
                     }
                     if self.status.mode != Mode::Off {
                         // Prevalidate the entire pose before any joint is written.
-                        let next: Vec<u16> = target
+                        let next: Vec<i32> = target
                             .iter()
                             .enumerate()
                             .map(|(i, t)| {
                                 let at = f64::from(measured[i]);
-                                (at + (*t - at).clamp(-12., 12.)).round() as u16
+                                (at + (*t - at).clamp(-12., 12.)).round() as i32
                             })
                             .collect();
                         for (j, t) in self.status.settings.iter().zip(&next) {
@@ -816,9 +816,9 @@ impl Controller {
                     let ticks = (self
                         .samples
                         .iter()
-                        .map(|(_, p)| u32::from(p[i]))
-                        .sum::<u32>()
-                        / self.samples.len() as u32) as u16;
+                        .map(|(_, p)| i64::from(p[i]))
+                        .sum::<i64>()
+                        / self.samples.len() as i64) as i32;
                     joints[i]
                         .checked_target(ticks)
                         .map_err(|e| format!("servo {}: {e}", joints[i].id))?;
@@ -1011,7 +1011,7 @@ mod workflow_tests {
         assert_eq!(io.gain(), None);
     }
 
-    fn set_zero(id: u8, ticks: u16) -> Request {
+    fn set_zero(id: u8, ticks: i32) -> Request {
         serde_json::from_value(json!({"op":"set_zero", "id":id, "ticks":ticks})).unwrap()
     }
     #[test]
@@ -1226,6 +1226,37 @@ mod workflow_tests {
         );
         c.samples.back_mut().unwrap().1[0] += 30;
         assert!(c.execute(&h.path, &mut io, Request::Capture).is_err());
+    }
+    #[test]
+    fn negative_capture_and_individual_zero_are_saved_without_wrapping() {
+        let (_d, h, mut c, mut io) = setup();
+        c.execute(&h.path, &mut io, Request::Enter).unwrap();
+        let mut pose = c.positions().unwrap();
+        for (i, joint) in c.status.settings.iter_mut().enumerate() {
+            joint.min_ticks = Some(-32767);
+            joint.max_ticks = Some(32767);
+            pose[i] -= 2116; // The same reference pose, with encoder zero at -68.
+        }
+        for i in 0..10 {
+            c.samples
+                .push_back((Instant::now() - Duration::from_millis(1500 - i * 100), pose));
+        }
+        c.execute(&h.path, &mut io, Request::Capture).unwrap();
+        assert!(
+            c.status
+                .candidate
+                .unwrap()
+                .iter()
+                .all(|j| j.zero_ticks == Some(-68))
+        );
+        c.execute(&h.path, &mut io, Request::Save).unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&h.path).unwrap()).unwrap();
+        assert_eq!(saved["joints"][0]["zero_ticks"], -68);
+        c.execute(&h.path, &mut io, set_zero(JOINT_IDS[0], -105))
+            .unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&h.path).unwrap()).unwrap();
+        assert_eq!(saved["joints"][0]["zero_ticks"], -105);
+        assert_eq!(saved["joints"][1]["zero_ticks"], -68);
     }
     #[test]
     fn imu_calibration_is_independent_and_requires_fresh_stationary_samples() {

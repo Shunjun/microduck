@@ -1,11 +1,15 @@
 import type { DebugState, Hardware, Joint } from './model'
+
+// FT-SCS: bit 15 is direction; 4096 ticks still represent one revolution.
+export const POSITION_MIN_TICKS = -32767
+export const POSITION_MAX_TICKS = 32767
 export function jointLimits(joint: Joint) {
   return (
     (joint.direction === 1 || joint.direction === -1) &&
     Number.isInteger(joint.min_ticks) &&
     Number.isInteger(joint.max_ticks) &&
-    joint.min_ticks! >= 0 &&
-    joint.max_ticks! <= 4095 &&
+    joint.min_ticks! >= POSITION_MIN_TICKS &&
+    joint.max_ticks! <= POSITION_MAX_TICKS &&
     joint.min_ticks! < joint.max_ticks!
   )
 }

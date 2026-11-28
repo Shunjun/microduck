@@ -678,7 +678,8 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// v71 adds robot.servoDebug set_zero for individually saved software zeros.
 /// v72 adds live port/gain settings and the explicit commissioning finish.
 /// API 73 adds independent peripheral selection and saved configuration reports.
-pub const API_VERSION: u32 = 73;
+/// API 74 carries signed FT-SCS position/zero/limit ticks in robot.servoDebug.
+pub const API_VERSION: u32 = 74;
 
 /// The observation width every policy this robot family runs is built against.
 ///

@@ -59,7 +59,15 @@ pub fn exchange<B: RegisterBus>(
                 .find(|j| j.id == *id)
                 .ok_or_else(|| error("unknown joint"))?;
             j.checked_target(*ticks)?;
-            write = Some((vec![*id], 42, vec![ticks.to_le_bytes().to_vec()]));
+            write = Some((
+                vec![*id],
+                42,
+                vec![
+                    super::feedback::encode_position(*ticks)?
+                        .to_le_bytes()
+                        .to_vec(),
+                ],
+            ));
         }
         DeviceOp::Torque { id, on } => {
             write = Some((
@@ -103,14 +111,11 @@ pub fn exchange<B: RegisterBus>(
             let reading = (|| {
                 identify(bus, j.id)?;
                 let s = ServoFeedback::parse(&bus.read(j.id, 56, 15)?)?;
-                if !(0..=4095).contains(&s.position_ticks) {
-                    return Err(error("position outside single-turn range"));
-                }
                 let torque = bus.read(j.id, 40, 1)?[0] != 0;
                 let p = bus.read(j.id, 21, 1)?[0];
                 Ok(JointReading {
                     id: j.id,
-                    ticks: Some(s.position_ticks as u16),
+                    ticks: Some(s.position_ticks),
                     torque: Some(torque),
                     p: Some(p),
                     voltage: Some(s.voltage),
@@ -141,7 +146,9 @@ fn identify<B: RegisterBus>(bus: &mut B, id: u8) -> Result<()> {
         return Err(error(format!("servo {id}: not HD1910")));
     }
     if !matches!(bus.read(id, 33, 1)?.as_slice(), [0] | [4]) {
-        return Err(error(format!("servo {id}: not single-turn position mode")));
+        return Err(error(format!(
+            "servo {id}: unsupported position mode (expected 0 or 4)"
+        )));
     }
     Ok(())
 }
@@ -226,6 +233,7 @@ mod tests {
     struct Bus {
         writes: Vec<(Vec<u8>, u8)>,
         missing: Option<u8>,
+        position: u16,
     }
     impl RegisterBus for Bus {
         fn read(&mut self, id: u8, addr: u8, len: u8) -> Result<Vec<u8>> {
@@ -238,7 +246,7 @@ mod tests {
                 33 => vec![0],
                 56 => {
                     let mut b = vec![0; 15];
-                    b[0..2].copy_from_slice(&2048_u16.to_le_bytes());
+                    b[0..2].copy_from_slice(&self.position.to_le_bytes());
                     b[6] = 74;
                     b[7] = 30;
                     b
@@ -261,6 +269,7 @@ mod tests {
         let mut b = Bus {
             writes: vec![],
             missing: Some(crate::JOINT_IDS[0]),
+            position: 2048,
         };
         let mut s = crate::servo_debug::settings();
         let r = exchange(&mut b, &mut s, &DeviceOp::Read).unwrap();
@@ -274,6 +283,7 @@ mod tests {
         let mut b = Bus {
             writes: vec![],
             missing: None,
+            position: 2048,
         };
         let mut s = crate::servo_debug::SimDevice::default().joints;
         s[0].max_ticks = Some(3000);
@@ -289,5 +299,35 @@ mod tests {
             .is_err()
         );
         assert!(b.writes.is_empty());
+    }
+
+    #[test]
+    fn signed_and_multiturn_readback_does_not_require_single_turn_positions() {
+        for (raw, ticks) in [
+            (0x8044, -68),
+            (0x1062, 4194),
+            (0x8069, -105),
+            (0x7fff, 32767),
+            (0xffff, -32767),
+        ] {
+            let mut bus = Bus {
+                writes: vec![],
+                missing: None,
+                position: raw,
+            };
+            let readings = exchange(
+                &mut bus,
+                &mut crate::servo_debug::settings(),
+                &DeviceOp::Read,
+            )
+            .unwrap();
+            assert!(
+                readings[0].error.is_none(),
+                "{raw:#06x}: {:?}",
+                readings[0].error
+            );
+            assert_eq!(readings[0].ticks.unwrap(), ticks);
+            assert!(bus.writes.is_empty());
+        }
     }
 }
