@@ -26,6 +26,7 @@ export interface Reading {
   id: number
   ticks: number | null
   p: number | null
+  output_limit: number | null
   voltage: number | null
   temperature: number | null
   torque: boolean | null
@@ -38,6 +39,10 @@ export interface DebugState {
   simulated: boolean
   mode: 'off' | 'hold' | 'follow'
   p: number
+  follow_output_limit: number
+  reference_ticks: number[] | null
+  joint_calibrated: boolean[]
+  mirrored: boolean[]
   names: string[]
   reference: number[]
   settings: Joint[]

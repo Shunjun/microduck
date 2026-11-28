@@ -26,8 +26,6 @@ impl JointSetting {
             || self.min_ticks.is_some_and(|v| !valid_position(v))
             || self.max_ticks.is_some_and(|v| !valid_position(v))
             || matches!((self.min_ticks, self.max_ticks), (Some(a), Some(b)) if a >= b)
-            || matches!((self.zero_ticks,self.min_ticks), (Some(z),Some(m)) if z < m)
-            || matches!((self.zero_ticks,self.max_ticks), (Some(z),Some(m)) if z > m)
         {
             return Err(error("invalid direction, zero or mechanical limits"));
         }
@@ -42,7 +40,14 @@ impl JointSetting {
         }
         match (self.min_ticks, self.max_ticks) {
             (Some(lo), Some(hi)) if (lo..=hi).contains(&ticks) => Ok(()),
-            _ => Err(error("configure mechanical limits before moving")),
+            (Some(lo), Some(hi)) => Err(error(format!(
+                "servo {}: position {ticks} outside mechanical limits {lo}..{hi}",
+                self.id
+            ))),
+            _ => Err(error(format!(
+                "servo {}: configure both mechanical limits before moving",
+                self.id
+            ))),
         }
     }
     pub fn radians(&self, ticks: i32) -> Option<f64> {
@@ -60,6 +65,8 @@ pub struct JointReading {
     pub ticks: Option<i32>,
     pub torque: Option<bool>,
     pub p: Option<u8>,
+    /// Motor drive ceiling, 0..1000; not a calibrated physical torque.
+    pub output_limit: Option<u16>,
     pub voltage: Option<f64>,
     pub temperature: Option<u8>,
     pub current_raw: Option<u16>,
@@ -72,6 +79,7 @@ impl JointReading {
             ticks: None,
             torque: None,
             p: None,
+            output_limit: None,
             voltage: None,
             temperature: None,
             current_raw: None,
@@ -86,10 +94,30 @@ impl JointReading {
 #[allow(clippy::large_enum_variant)]
 pub enum DeviceOp {
     Read,
-    Position { id: u8, ticks: i32 },
-    Torque { id: Option<u8>, on: bool },
-    Gain { id: Option<u8>, p: u8 },
-    Configure { joints: [JointSetting; NUM_JOINTS] },
+    Position {
+        id: u8,
+        ticks: i32,
+    },
+    /// Commissioning-only hold target derived from the latest measured pose, never a UI move.
+    FollowPosition {
+        id: u8,
+        ticks: i32,
+    },
+    Torque {
+        id: Option<u8>,
+        on: bool,
+    },
+    Gain {
+        id: Option<u8>,
+        p: u8,
+    },
+    OutputLimit {
+        id: u8,
+        limit: u16,
+    },
+    Configure {
+        joints: [JointSetting; NUM_JOINTS],
+    },
 }
 pub fn error(message: impl Into<String>) -> IoError {
     IoError::Bus(message.into())
@@ -188,6 +216,7 @@ impl Default for SimDevice {
                 ),
                 torque: Some(false),
                 p: Some(180),
+                output_limit: Some(1000),
                 voltage: Some(7.4),
                 temperature: Some(30),
                 current_raw: Some(0),
@@ -206,13 +235,19 @@ impl SimDevice {
                 }
                 self.joints = *joints;
             }
-            DeviceOp::Position { id, ticks } => {
+            DeviceOp::Position { id, ticks } | DeviceOp::FollowPosition { id, ticks } => {
                 let i = self
                     .joints
                     .iter()
                     .position(|j| j.id == *id)
                     .ok_or_else(|| error("unknown joint"))?;
-                self.joints[i].checked_target(*ticks)?;
+                if matches!(op, DeviceOp::FollowPosition { .. }) {
+                    if !valid_position(*ticks) {
+                        return Err(error("position outside signed register range"));
+                    }
+                } else {
+                    self.joints[i].checked_target(*ticks)?;
+                }
                 self.readings[i].ticks = Some(*ticks);
             }
             DeviceOp::Torque { id, on } => {
@@ -231,6 +266,17 @@ impl SimDevice {
                         r.p = Some(*p);
                     }
                 }
+            }
+            DeviceOp::OutputLimit { id, limit } => {
+                if *limit > 1000 {
+                    return Err(error("output limit must be 0..1000"));
+                }
+                let reading = self
+                    .readings
+                    .iter_mut()
+                    .find(|r| r.id == *id)
+                    .ok_or_else(|| error("unknown joint"))?;
+                reading.output_limit = Some(*limit);
             }
             DeviceOp::Read => {}
         }

@@ -1,7 +1,7 @@
 # `duckctl`, the laptop-side tool, built once per platform and handed out two ways from the same
 # binary: a wheel (`duckctl-wheel-<platform>`), which is what `uvx duckctl` installs from PyPI, and
 # a tarball or zip (`duckctl-<platform>`), which `scripts/install-duckctl.sh` fetches from a branch's
-# prerelease. Called by `dev.yml` on every push and by `duckctl-pypi.yml` on a release tag.
+# prerelease. Called by `dev.yml` on branch pushes; this fork does not publish to PyPI.
 #
 # Built by maturin (`duckctl/pyproject.toml`), and the archive is the binary taken back out of the
 # wheel, so there is no second build that could differ from the first. On Linux maturin builds in

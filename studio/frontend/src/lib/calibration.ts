@@ -22,8 +22,8 @@ export function reusablePose(state: DebugState) {
         jointLimits(j) &&
         j.zero_ticks !== null &&
         Number.isInteger(j.zero_ticks) &&
-        j.zero_ticks >= j.min_ticks! &&
-        j.zero_ticks <= j.max_ticks!,
+        j.zero_ticks >= POSITION_MIN_TICKS &&
+        j.zero_ticks <= POSITION_MAX_TICKS,
     )
   )
 }

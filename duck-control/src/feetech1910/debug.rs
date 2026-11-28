@@ -53,12 +53,14 @@ pub fn exchange<B: RegisterBus>(
     }
     let mut write: Option<(Vec<u8>, u8, Vec<Vec<u8>>)> = None;
     match op {
-        DeviceOp::Position { id, ticks } => {
+        DeviceOp::Position { id, ticks } | DeviceOp::FollowPosition { id, ticks } => {
             let j = settings
                 .iter()
                 .find(|j| j.id == *id)
                 .ok_or_else(|| error("unknown joint"))?;
-            j.checked_target(*ticks)?;
+            if !matches!(op, DeviceOp::FollowPosition { .. }) {
+                j.checked_target(*ticks)?;
+            }
             write = Some((
                 vec![*id],
                 42,
@@ -75,6 +77,13 @@ pub fn exchange<B: RegisterBus>(
                 40,
                 vec![vec![u8::from(*on)]; if id.is_some() { 1 } else { NUM_JOINTS }],
             ))
+        }
+        DeviceOp::OutputLimit { id, limit } => {
+            if *limit > 1000 {
+                return Err(error("output limit must be 0..1000"));
+            }
+            let target_ids = ids(settings, Some(*id))?;
+            write = Some((target_ids, 48, vec![limit.to_le_bytes().to_vec()]));
         }
         DeviceOp::Gain { id, p } => {
             if *p > 254 {
@@ -118,6 +127,11 @@ pub fn exchange<B: RegisterBus>(
                     ticks: Some(s.position_ticks),
                     torque: Some(torque),
                     p: Some(p),
+                    output_limit: Some(u16::from_le_bytes(
+                        bus.read(j.id, 48, 2)?
+                            .try_into()
+                            .map_err(|_| error("short output limit read"))?,
+                    )),
                     voltage: Some(s.voltage),
                     temperature: Some(s.temperature_c),
                     current_raw: Some(s.current_raw),

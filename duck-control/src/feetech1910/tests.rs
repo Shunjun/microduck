@@ -376,3 +376,54 @@ fn robotio_gain_writes_direct_p_and_rejects_overflow_without_io() {
     assert!(io.bus.bus.expected.is_empty());
 }
 const JOINT_IDS_FOR_TEST: [u8; NUM_JOINTS] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
+#[test]
+fn debug_output_limit_uses_ram_and_verifies_readback() {
+    use crate::servo_debug::{DeviceOp, SimDevice};
+    let mut settings = SimDevice::default().joints;
+    let mut mock = MockBus::default();
+    mock.push(Request::Read(20, 3, 2), Ok(vec![vec![10, 31]]));
+    mock.push(Request::Read(20, 33, 1), Ok(vec![vec![4]]));
+    mock.push(Request::Write(vec![20], 48, vec![vec![50, 0]]), Ok(vec![]));
+    mock.push(Request::Read(20, 48, 2), Ok(vec![vec![50, 0]]));
+    super::debug::exchange(
+        &mut mock,
+        &mut settings,
+        &DeviceOp::OutputLimit { id: 20, limit: 50 },
+    )
+    .unwrap();
+    assert!(mock.expected.is_empty());
+    assert!(
+        super::debug::exchange(
+            &mut mock,
+            &mut settings,
+            &DeviceOp::OutputLimit {
+                id: 20,
+                limit: 1001
+            }
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn debug_output_limit_rejects_mismatched_readback() {
+    use crate::servo_debug::{DeviceOp, SimDevice};
+    let mut mock = MockBus::default();
+    mock.push(Request::Read(20, 3, 2), Ok(vec![vec![10, 31]]));
+    mock.push(Request::Read(20, 33, 1), Ok(vec![vec![4]]));
+    mock.push(Request::Write(vec![20], 48, vec![vec![250, 0]]), Ok(vec![]));
+    mock.push(Request::Read(20, 48, 2), Ok(vec![vec![232, 3]]));
+    let result = super::debug::exchange(
+        &mut mock,
+        &mut SimDevice::default().joints,
+        &DeviceOp::OutputLimit { id: 20, limit: 250 },
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("readback mismatch")
+    );
+    assert!(mock.expected.is_empty());
+}

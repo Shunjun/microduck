@@ -10,9 +10,10 @@ interface PoseProps {
   angles?: number[]
   orientation?: number[]
   label: string
+  selectedJoint?: number
   children?: ReactNode
 }
-export function PoseView({ angles, orientation, label, children }: PoseProps) {
+export function PoseView({ angles, orientation, label, selectedJoint = -1, children }: PoseProps) {
   const canvas = useRef<HTMLCanvasElement>(null)
   const surface = useRef<HTMLDivElement>(null)
   const engine = useRef<Preview | null>(null)
@@ -33,6 +34,7 @@ export function PoseView({ angles, orientation, label, children }: PoseProps) {
   useEffect(() => {
     if (angles) engine.current?.pose(angles, orientation)
   }, [angles, orientation])
+  useEffect(() => { engine.current?.highlightJoint(selectedJoint) }, [selectedJoint])
   return (
     <div
       ref={surface}

@@ -16,10 +16,17 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
+mod commissioning;
 
+// Output drive ceiling, not 25% of a measured shaft torque. SRAM only.
+const FOLLOW_OUTPUT_LIMIT: u16 = 250;
+const FOLLOW_DEADBAND_TICKS: f64 = 4.; // 0.3515625 degrees at 4096 ticks/revolution.
+const FOLLOW_CONFIRM_SAMPLES: u8 = 2;
 type Reply = Result<Status, String>;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+// Fixed-size commissioning data avoids a second allocation in the bounded request queue.
+#[allow(clippy::large_enum_variant)]
 pub enum Request {
     ImuCapture {
         mount: Option<[f64; 4]>,
@@ -34,6 +41,19 @@ pub enum Request {
     Enter,
     Exit,
     Scan,
+    Probe,
+    ReferenceCapture,
+    FollowLimit {
+        limit: u16,
+    },
+    JointCalibration {
+        id: u8,
+        positive_ticks: i32,
+        negative_ticks: i32,
+        min_ticks: i32,
+        max_ticks: i32,
+        mirror: bool,
+    },
     Mode {
         mode: Mode,
         p: u8,
@@ -82,6 +102,10 @@ pub struct Status {
     pub simulated: bool,
     pub mode: Mode,
     pub p: u8,
+    pub follow_output_limit: u16,
+    pub reference_ticks: Option<[i32; NUM_JOINTS]>,
+    pub joint_calibrated: [bool; NUM_JOINTS],
+    pub mirrored: [bool; NUM_JOINTS],
     pub names: Vec<String>,
     pub reference: [f64; NUM_JOINTS],
     pub settings: [JointSetting; NUM_JOINTS],
@@ -141,6 +165,17 @@ impl Status {
             simulated,
             mode: Mode::Off,
             p: 20,
+            follow_output_limit: FOLLOW_OUTPUT_LIMIT,
+            reference_ticks: serde_json::from_value(
+                document["commissioning_reference_ticks"].clone(),
+            )
+            .ok(),
+            joint_calibrated: serde_json::from_value(
+                document["commissioning_joint_calibrated"].clone(),
+            )
+            .unwrap_or([false; NUM_JOINTS]),
+            mirrored: serde_json::from_value(document["commissioning_mirrored"].clone())
+                .unwrap_or([false; NUM_JOINTS]),
             names: JOINT_NAMES.iter().map(|s| s.to_string()).collect(),
             reference: DEFAULT_POSITION,
             settings,
@@ -270,6 +305,7 @@ pub struct Controller {
     imu_samples: VecDeque<(Instant, duck_control::servo_debug::ImuReading)>,
     target: Option<[f64; NUM_JOINTS]>,
     follow_counts: [u8; NUM_JOINTS],
+    output_limits: [Option<u16>; NUM_JOINTS],
 }
 impl Controller {
     pub fn new(hub: &Hub) -> Self {
@@ -282,6 +318,7 @@ impl Controller {
             imu_samples: VecDeque::new(),
             target: None,
             follow_counts: [0; NUM_JOINTS],
+            output_limits: [None; NUM_JOINTS],
         }
     }
     pub fn may_hold(&self) -> bool {
@@ -293,7 +330,12 @@ impl Controller {
         op: DeviceOp,
     ) -> Result<(), String> {
         // A failed enable can still have powered some servos. Only a verified all-off clears it.
-        if matches!(op, DeviceOp::Torque { on: true, .. }) {
+        if matches!(
+            op,
+            DeviceOp::Torque { on: true, .. }
+                | DeviceOp::Position { .. }
+                | DeviceOp::FollowPosition { .. }
+        ) {
             self.may_hold = true;
         }
         let readings = io.servo_debug(&op).map_err(|e| e.to_string())?;
@@ -305,6 +347,14 @@ impl Controller {
             }
         ) {
             self.may_hold = false;
+            // Restore original per-servo ceilings only after all-off was confirmed.
+            for (i, &id) in JOINT_IDS.iter().enumerate() {
+                if let Some(limit) = self.output_limits[i] {
+                    io.servo_debug(&DeviceOp::OutputLimit { id, limit })
+                        .map_err(|e| format!("servo {id}: restore output limit: {e}"))?;
+                    self.output_limits[i] = None;
+                }
+            }
         }
         if matches!(op, DeviceOp::Read) {
             self.may_hold |= readings.iter().any(|r| r.torque == Some(true));
@@ -313,6 +363,41 @@ impl Controller {
             self.last_read = Some(Instant::now());
         }
         Ok(())
+    }
+    fn follow_target(&mut self, measured: &[i32; NUM_JOINTS], target: &mut [f64; NUM_JOINTS]) {
+        for i in 0..NUM_JOINTS {
+            let delta = f64::from(measured[i]) - target[i];
+            self.follow_counts[i] = if delta.abs() >= FOLLOW_DEADBAND_TICKS {
+                self.follow_counts[i].saturating_add(1)
+            } else {
+                0
+            };
+            if self.follow_counts[i] >= FOLLOW_CONFIRM_SAMPLES {
+                target[i] = f64::from(measured[i]);
+                self.follow_counts[i] = 0;
+            }
+        }
+    }
+    fn motion_failed<T: duck_control::RobotIo>(
+        &mut self,
+        io: &mut duck_control::safety::Safety<T>,
+        reason: String,
+    ) -> String {
+        self.target = None;
+        self.status.moving = false;
+        self.status.mode = Mode::Off;
+        self.samples.clear();
+        self.follow_counts = [0; NUM_JOINTS];
+        match self.device(
+            io,
+            DeviceOp::Torque {
+                id: None,
+                on: false,
+            },
+        ) {
+            Ok(_) => reason,
+            Err(e) => format!("{reason}; unloading or limit restoration unconfirmed: {e}"),
+        }
     }
     fn positions(&self) -> Result<[i32; NUM_JOINTS], String> {
         if self
@@ -350,13 +435,26 @@ impl Controller {
             let finish = matches!(pending.request, Request::Finish);
             let persist = matches!(
                 pending.request,
-                Request::Save | Request::SetZero { .. } | Request::Units { .. } | Request::ImuSave
+                Request::Save
+                    | Request::SetZero { .. }
+                    | Request::Units { .. }
+                    | Request::ImuSave
+                    | Request::ReferenceCapture
+                    | Request::JointCalibration { .. }
             );
-            let result = if !allow_enter && matches!(pending.request, Request::Enter) {
+            let mut result = if !allow_enter && matches!(pending.request, Request::Enter) {
                 Err("cannot enter debug during shutdown/rest".into())
             } else {
                 self.execute(&hub.path, io, pending.request)
             };
+            if result.is_err()
+                && (self.may_hold
+                    || self.status.mode != Mode::Off
+                    || self.output_limits.iter().any(Option::is_some))
+            {
+                let reason = result.unwrap_err();
+                result = Err(self.motion_failed(io, reason));
+            }
             if result.is_ok() && finish {
                 hub.request_reopen();
                 hub.bootstrap.store(false, Ordering::Release);
@@ -426,17 +524,7 @@ impl Controller {
                 }
                 if let Some(mut target) = self.target {
                     if self.status.mode == Mode::Follow && !self.status.moving {
-                        for i in 0..NUM_JOINTS {
-                            let delta = f64::from(measured[i]) - target[i];
-                            self.follow_counts[i] = if delta.abs() > 24. {
-                                self.follow_counts[i].saturating_add(1)
-                            } else {
-                                0
-                            };
-                            if self.follow_counts[i] >= 3 {
-                                target[i] += delta * 0.25;
-                            }
-                        }
+                        self.follow_target(&measured, &mut target);
                         self.target = Some(target);
                     }
                     if self.status.mode != Mode::Off {
@@ -449,8 +537,13 @@ impl Controller {
                                 (at + (*t - at).clamp(-12., 12.)).round() as i32
                             })
                             .collect();
-                        for (j, t) in self.status.settings.iter().zip(&next) {
-                            j.checked_target(*t).map_err(|e| e.to_string())?;
+                        let initial_follow = self.status.calibration_required
+                            && self.status.mode == Mode::Follow
+                            && !self.status.moving;
+                        if !initial_follow {
+                            for (j, t) in self.status.settings.iter().zip(&next) {
+                                j.checked_target(*t).map_err(|e| e.to_string())?;
+                            }
                         }
                         let mut reached = true;
                         for (i, &t) in next.iter().enumerate() {
@@ -462,9 +555,16 @@ impl Controller {
                             }
                             self.device(
                                 io,
-                                DeviceOp::Position {
-                                    id: JOINT_IDS[i],
-                                    ticks: t,
+                                if initial_follow {
+                                    DeviceOp::FollowPosition {
+                                        id: JOINT_IDS[i],
+                                        ticks: t,
+                                    }
+                                } else {
+                                    DeviceOp::Position {
+                                        id: JOINT_IDS[i],
+                                        ticks: t,
+                                    }
                                 },
                             )?;
                         }
@@ -476,11 +576,14 @@ impl Controller {
                 Ok::<(), String>(())
             })();
             if let Err(e) = result {
-                self.status.error = Some(e);
+                self.status.error = Some(if self.may_hold || self.status.mode != Mode::Off {
+                    self.motion_failed(io, e)
+                } else {
+                    e
+                });
                 self.samples.clear();
                 self.target = None;
                 self.status.moving = false;
-                // Stop target updates on bad feedback; do not infer that a failed torque write unloaded the robot.
             }
             *hub.latest.lock().unwrap() = self.status.clone();
         }
@@ -518,10 +621,37 @@ impl Controller {
             self.samples.clear();
             return Ok(());
         }
+        if matches!(r, Request::Probe) {
+            return self.device(io, DeviceOp::Read);
+        }
         if !self.status.active {
             return Err("enter servo debug mode first".into());
         }
         match r {
+            Request::ReferenceCapture => self.capture_reference(path, io)?,
+            Request::JointCalibration {
+                id,
+                positive_ticks,
+                negative_ticks,
+                min_ticks,
+                max_ticks,
+                mirror,
+            } => {
+                self.calibrate_joint(
+                    path,
+                    io,
+                    commissioning::JointEvidence {
+                        id,
+                        positive_ticks,
+                        negative_ticks,
+                        min_ticks,
+                        max_ticks,
+                        mirror,
+                    },
+                )?;
+            }
+            Request::FollowLimit { limit } => self.set_follow_limit(io, limit)?,
+            Request::Probe => unreachable!(),
             Request::Units {
                 speed_rad_s_per_unit,
                 current_ma_per_unit,
@@ -704,6 +834,9 @@ impl Controller {
                 if p == 255 {
                     return Err("P must be 0..254".into());
                 }
+                if mode == Mode::Follow && self.status.follow_output_limit == 0 {
+                    return Err("set follow output above zero before enabling follow".into());
+                }
                 if mode == Mode::Off {
                     self.target = None;
                     self.status.moving = false;
@@ -717,18 +850,69 @@ impl Controller {
                     self.status.mode = Mode::Off;
                     return Ok(());
                 }
+                // A mode change must never write new targets under an old powered hold.
+                self.target = None;
+                self.status.moving = false;
+                self.device(
+                    io,
+                    DeviceOp::Torque {
+                        id: None,
+                        on: false,
+                    },
+                )?;
+                self.status.mode = Mode::Off;
+                self.follow_counts = [0; NUM_JOINTS];
                 self.device(io, DeviceOp::Read)?;
                 let pose = self.positions()?;
                 if mode != Mode::Off {
-                    for (j, &t) in self.status.settings.iter().zip(&pose) {
-                        j.checked_target(t).map_err(|e| e.to_string())?;
+                    let initial_follow = self.status.calibration_required && mode == Mode::Follow;
+                    if !initial_follow {
+                        for (j, &t) in self.status.settings.iter().zip(&pose) {
+                            j.checked_target(t).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    if mode == Mode::Follow {
+                        // Snapshot every ceiling before any change; never raise an existing lower cap.
+                        let original: Vec<u16> = JOINT_IDS
+                            .iter()
+                            .map(|id| {
+                                self.status
+                                    .readings
+                                    .iter()
+                                    .find(|r| r.id == *id)
+                                    .and_then(|r| r.output_limit)
+                                    .filter(|limit| *limit <= 1000)
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "servo {id}: output limit unavailable; follow refused"
+                                        )
+                                    })
+                            })
+                            .collect::<Result<_, _>>()?;
+                        for (i, &limit) in original.iter().enumerate() {
+                            self.output_limits[i] = Some(limit);
+                            self.device(
+                                io,
+                                DeviceOp::OutputLimit {
+                                    id: JOINT_IDS[i],
+                                    limit: limit.min(self.status.follow_output_limit),
+                                },
+                            )?;
+                        }
                     }
                     for (i, &ticks) in pose.iter().enumerate() {
                         self.device(
                             io,
-                            DeviceOp::Position {
-                                id: JOINT_IDS[i],
-                                ticks,
+                            if initial_follow {
+                                DeviceOp::FollowPosition {
+                                    id: JOINT_IDS[i],
+                                    ticks,
+                                }
+                            } else {
+                                DeviceOp::Position {
+                                    id: JOINT_IDS[i],
+                                    ticks,
+                                }
                             },
                         )?;
                     }
@@ -869,6 +1053,9 @@ fn save_settings(
     joints: &[JointSetting; NUM_JOINTS],
     pending: bool,
 ) -> Result<(), String> {
+    save_step(path, settings_document(path, joints)?, pending)
+}
+fn settings_document(path: &Path, joints: &[JointSetting; NUM_JOINTS]) -> Result<Value, String> {
     check_settings(joints)?;
     let mut v = calibration_document(path)?;
     // Preserve device-specific metadata by ID, even when rebuilding a corrupt joint list.
@@ -887,7 +1074,7 @@ fn save_settings(
         })
         .collect();
     v["joints"] = json!(new);
-    save_step(path, v, pending)
+    Ok(v)
 }
 fn save_step(path: &Path, mut doc: Value, pending: bool) -> Result<(), String> {
     if pending {
@@ -1207,6 +1394,126 @@ mod workflow_tests {
         assert_eq!(c.status.mode, Mode::Off);
     }
     #[test]
+    fn follow_limits_output_and_restores_it_after_unload() {
+        let (_d, h, mut c, mut io) = setup();
+        c.execute(&h.path, &mut io, Request::Enter).unwrap();
+        c.execute(
+            &h.path,
+            &mut io,
+            Request::Mode {
+                mode: Mode::Follow,
+                p: 6,
+            },
+        )
+        .unwrap();
+        c.device(&mut io, DeviceOp::Read).unwrap();
+        assert!(
+            c.status
+                .readings
+                .iter()
+                .all(|r| r.output_limit == Some(250))
+        );
+        c.execute(
+            &h.path,
+            &mut io,
+            Request::Mode {
+                mode: Mode::Off,
+                p: 6,
+            },
+        )
+        .unwrap();
+        c.device(&mut io, DeviceOp::Read).unwrap();
+        assert!(
+            c.status
+                .readings
+                .iter()
+                .all(|r| r.torque == Some(false) && r.output_limit == Some(1000))
+        );
+        assert!(c.output_limits.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn follow_responds_to_four_ticks_after_two_samples_without_chasing_noise() {
+        let (_d, _h, mut c, _io) = setup();
+        let mut target = [2000.; NUM_JOINTS];
+        let mut pose = [2000; NUM_JOINTS];
+        pose[0] += 3;
+        for _ in 0..5 {
+            c.follow_target(&pose, &mut target);
+        }
+        assert_eq!(target[0], 2000.);
+        pose[0] += 1;
+        c.follow_target(&pose, &mut target);
+        assert_eq!(target[0], 2000.);
+        c.follow_target(&pose, &mut target);
+        assert_eq!(target[0], 2004.);
+    }
+    #[test]
+    fn follow_preserves_a_lower_existing_ceiling() {
+        let (_d, h, mut c, mut io) = setup();
+        c.execute(&h.path, &mut io, Request::Enter).unwrap();
+        c.device(
+            &mut io,
+            DeviceOp::OutputLimit {
+                id: JOINT_IDS[0],
+                limit: 100,
+            },
+        )
+        .unwrap();
+        c.execute(
+            &h.path,
+            &mut io,
+            Request::Mode {
+                mode: Mode::Follow,
+                p: 6,
+            },
+        )
+        .unwrap();
+        c.device(&mut io, DeviceOp::Read).unwrap();
+        assert_eq!(c.status.readings[0].output_limit, Some(100));
+        c.execute(&h.path, &mut io, Request::Exit).unwrap();
+        c.device(&mut io, DeviceOp::Read).unwrap();
+        assert_eq!(c.status.readings[0].output_limit, Some(100));
+        assert_eq!(c.status.readings[1].output_limit, Some(1000));
+    }
+
+    #[test]
+    fn feedback_fault_unloads_and_restores_limits_instead_of_leaving_hold_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Hub::new(dir.path().join("profile.json"), true, false);
+        let mut c = Controller::new(&h);
+        c.status.active = true;
+        c.status.mode = Mode::Follow;
+        c.target = Some([2048.; NUM_JOINTS]);
+        c.may_hold = true;
+        c.output_limits = [Some(1000); NUM_JOINTS];
+        let mut fake = FakeIo::new();
+        for r in &mut fake.debug_device.readings {
+            r.torque = Some(true);
+            r.output_limit = Some(250);
+        }
+        fake.debug_device.readings[7].error = Some("hardware status 2".into());
+        let mut io = Safety::new(fake, SafetyConfig::default());
+        c.tick(&h, &mut io, true);
+        assert_eq!(c.status.mode, Mode::Off);
+        assert!(c.target.is_none());
+        assert!(!c.may_hold());
+        assert!(
+            c.status
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("hardware status 2")
+        );
+        c.device(&mut io, DeviceOp::Read).unwrap();
+        assert!(
+            c.status
+                .readings
+                .iter()
+                .all(|r| r.torque == Some(false) && r.output_limit == Some(1000))
+        );
+    }
+    #[test]
     fn capture_rejects_moving_data_and_maps_reference_pose_correctly() {
         let (_d, h, mut c, mut io) = setup();
         c.execute(&h.path, &mut io, Request::Enter).unwrap();
@@ -1318,10 +1625,16 @@ mod transition_tests {
         fake: FakeIo,
         log: Vec<DeviceOp>,
         fail_unload: bool,
+        fail_limit: bool,
     }
     impl RobotIo for Trace {
         fn servo_debug(&mut self, op: &DeviceOp) -> Result<Vec<JointReading>> {
             self.log.push(op.clone());
+            if self.fail_limit
+                && matches!(op, DeviceOp::OutputLimit { id, limit: 250 } if *id == JOINT_IDS[3])
+            {
+                return Err(duck_control::servo_debug::error("limit readback mismatch"));
+            }
             if self.fail_unload && matches!(op, DeviceOp::Torque { on: false, .. }) {
                 return Err(duck_control::servo_debug::error("unload failed"));
             }
@@ -1347,6 +1660,89 @@ mod transition_tests {
         }
     }
     #[test]
+    fn partial_limit_failure_unloads_and_restores_all_changed_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Hub::new(dir.path().join("profile.json"), true, false);
+        let mut c = Controller::new(&h);
+        let mut io = Safety::new(
+            Trace {
+                fake: FakeIo::new(),
+                log: vec![],
+                fail_unload: false,
+                fail_limit: true,
+            },
+            SafetyConfig::default(),
+        );
+        c.execute(&h.path, &mut io, Request::Enter).unwrap();
+        let (reply, receive) = oneshot::channel();
+        h.queue.lock().unwrap().push_back(Pending {
+            request: Request::Mode {
+                mode: Mode::Follow,
+                p: 6,
+            },
+            reply,
+            until: Instant::now() + Duration::from_secs(8),
+        });
+        c.tick(&h, &mut io, true);
+        assert!(
+            receive
+                .blocking_recv()
+                .unwrap()
+                .err()
+                .unwrap()
+                .contains("limit readback mismatch")
+        );
+        assert_eq!(c.status.mode, Mode::Off);
+        assert!(c.target.is_none());
+        assert!(!c.may_hold());
+        assert!(c.output_limits.iter().all(Option::is_none));
+        c.device(&mut io, DeviceOp::Read).unwrap();
+        assert!(
+            c.status
+                .readings
+                .iter()
+                .all(|r| r.torque == Some(false) && r.output_limit == Some(1000))
+        );
+    }
+
+    #[test]
+    fn failed_unload_does_not_raise_output_caps() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Hub::new(dir.path().join("profile.json"), true, false);
+        let mut c = Controller::new(&h);
+        c.status.active = true;
+        c.status.mode = Mode::Follow;
+        c.may_hold = true;
+        c.output_limits = [Some(1000); NUM_JOINTS];
+        let mut fake = FakeIo::new();
+        for r in &mut fake.debug_device.readings {
+            r.torque = Some(true);
+            r.output_limit = Some(250);
+        }
+        let mut io = Safety::new(
+            Trace {
+                fake,
+                log: vec![],
+                fail_unload: true,
+                fail_limit: false,
+            },
+            SafetyConfig::default(),
+        );
+        assert!(
+            c.motion_failed(&mut io, "fault".into())
+                .contains("unconfirmed")
+        );
+        assert!(c.may_hold());
+        assert_eq!(c.output_limits, [Some(1000); NUM_JOINTS]);
+        c.device(&mut io, DeviceOp::Read).unwrap();
+        assert!(
+            c.status
+                .readings
+                .iter()
+                .all(|r| r.output_limit == Some(250))
+        );
+    }
+    #[test]
     fn saved_wizard_stays_pending_across_restart_and_failed_finish() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("profile.json");
@@ -1358,6 +1754,7 @@ mod transition_tests {
                 fake: FakeIo::new(),
                 log: vec![],
                 fail_unload: true,
+                fail_limit: false,
             },
             SafetyConfig::default(),
         );
@@ -1399,6 +1796,7 @@ mod transition_tests {
                 fake,
                 log: vec![],
                 fail_unload: true,
+                fail_limit: false,
             },
             SafetyConfig::default(),
         );
@@ -1435,6 +1833,7 @@ mod transition_tests {
                     fake: FakeIo::new(),
                     log: vec![],
                     fail_unload: true,
+                    fail_limit: false,
                 },
                 SafetyConfig::default(),
             );

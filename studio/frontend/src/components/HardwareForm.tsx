@@ -19,11 +19,12 @@ interface HardwareFormProps {
   info: Hardware
   refresh: () => Promise<void>
   wizard?: boolean
+  servoVerified?: boolean
   onPending?: (pending: boolean) => void
   ref?: Ref<SettingsSectionHandle>
   onSave?: () => void
 }
-export function HardwareForm({ info, refresh, wizard = false, onPending, ref, onSave }: HardwareFormProps) {
+export function HardwareForm({ info, refresh, wizard = false, servoVerified = false, onPending, ref, onSave }: HardwareFormProps) {
   const [driver, setDriver] = useState(info.configured_driver)
   const [port, setPort] = useState(info.configured_port)
   const [normal, setNormal] = useState(String(info.normal_p))
@@ -58,7 +59,7 @@ export function HardwareForm({ info, refresh, wizard = false, onPending, ref, on
     await act(async () => {
       await prepareSave()()
       await refresh()
-    }, '配置已保存。总线是否就绪请查看连接状态。')
+    }, wizard ? '配置已保存，请验证串口上的舵机。' : '配置已保存。总线是否就绪请查看连接状态。')
     setBusy(false)
   }
   return (
@@ -143,13 +144,13 @@ export function HardwareForm({ info, refresh, wizard = false, onPending, ref, on
         </FieldGroup>
       </form>
       <div className="mt-3 flex flex-col items-start gap-2">
-        <Badge variant="secondary">总线 · {busNames[info.bus_status] || info.bus_status}</Badge>
+        <Badge variant="secondary">{wizard ? (servoVerified ? '串口 · 已验证舵机' : '串口 · 待验证舵机') : '总线 · ' + (busNames[info.bus_status] || info.bus_status)}</Badge>
         {info.restart_required && (
           <p className="text-sm">
             驱动切换等待重启，端口和 P 也将在重启后生效。请停止运动后重启 robotd。
           </p>
         )}
-        <Problem>{info.bus_error}</Problem>
+        <Problem>{wizard && servoVerified ? null : info.bus_error}</Problem>
       </div>
     </Panel>
   )
