@@ -98,13 +98,7 @@ impl<B: RegisterBus> RobotIo for FeetechIo<B> {
                     joint.id, servo.status
                 )));
             }
-            if !(0..=4095).contains(&servo.position_ticks) {
-                return Err(fail(format!(
-                    "servo {} position is outside single-turn range",
-                    joint.id
-                )));
-            }
-            sensors.positions[i] = f64::from(servo.position_ticks - i32::from(joint.zero_ticks))
+            sensors.positions[i] = f64::from(servo.position_ticks - joint.zero_ticks)
                 * f64::from(joint.direction)
                 * std::f64::consts::TAU
                 / 4096.;

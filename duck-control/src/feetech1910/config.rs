@@ -13,19 +13,21 @@ use std::collections::HashSet;
 #[serde(deny_unknown_fields)]
 pub struct JointCalibration {
     pub id: u8,
-    pub zero_ticks: u16,
+    pub zero_ticks: i32,
     /// +1 or -1: maps increasing encoder positions to the training joint axis.
     pub direction: i8,
-    /// Measured safe encoder limits, in single-turn position mode (0..4095).
-    pub min_ticks: u16,
-    pub max_ticks: u16,
+    /// Measured mechanical limits in the same signed, accumulated coordinate as zero_ticks.
+    pub min_ticks: i32,
+    pub max_ticks: i32,
 }
 impl JointCalibration {
     pub(super) fn validate(&self) -> Result<()> {
         validate_ids(&[self.id])?;
         if ![-1, 1].contains(&self.direction)
             || self.min_ticks >= self.max_ticks
-            || self.max_ticks > 4095
+            || !crate::servo_debug::valid_position(self.zero_ticks)
+            || !crate::servo_debug::valid_position(self.min_ticks)
+            || !crate::servo_debug::valid_position(self.max_ticks)
             || self.zero_ticks < self.min_ticks
             || self.zero_ticks > self.max_ticks
         {
@@ -39,6 +41,7 @@ impl JointCalibration {
     /// Unrounded encoder target, shared with commissioning so an accepted calibration
     /// can always command its reference pose through the normal driver.
     pub fn target_ticks(&self, radians: f64) -> Result<f64> {
+        self.validate()?;
         let ticks = f64::from(self.zero_ticks)
             + radians * f64::from(self.direction) * 4096.0 / std::f64::consts::TAU;
         // Check before rounding: rounding must not disguise an out-of-range command.
@@ -54,7 +57,7 @@ impl JointCalibration {
         Ok(ticks)
     }
     pub(super) fn target(&self, radians: f64) -> Result<u16> {
-        self.target_ticks(radians).map(|ticks| ticks.round() as u16)
+        super::feedback::encode_position(self.target_ticks(radians)?.round() as i32)
     }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
