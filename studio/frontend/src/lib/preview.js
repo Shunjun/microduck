@@ -235,6 +235,8 @@ export class Preview {
     this.draw()
   }
 
+  highlightJoint(index) { this.selectedJoint = index; this.draw() }
+
   pose(angles, orientation = [1, 0, 0, 0]) {
     this.angles = angles
     this.orientation = orientation
@@ -362,7 +364,7 @@ export class Preview {
     for (const part of this.model.parts) {
       const mesh = this.meshBuffers[part.mesh]
       this.transform(compose(poses[part.body], part))
-      gl.uniform3f(this.color, ...part.rgb.map((value) => value / 255))
+      gl.uniform3f(this.color, ...(this.selectedJoint >= 0 && this.model.bodies[part.body].joint === this.selectedJoint ? [0.92, 0.56, 0.2] : part.rgb.map((value) => value / 255)))
       this.bind(mesh.buffer)
       gl.drawArrays(gl.TRIANGLES, 0, mesh.count)
     }

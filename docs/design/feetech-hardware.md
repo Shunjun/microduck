@@ -109,7 +109,7 @@ cargo run -p duck-control --release --example feetech_probe -- /dev/ttyUSB0 1,2 
 | 每项 `id` | 实际舵机 ID，不得重复或使用 200 |
 | `zero_ticks` | 该关节训练坐标为 0 rad 时的编码器值，不是默认站立角度 |
 | `direction` | 训练关节轴相对编码器递增方向：+1 或 -1 |
-| `min_ticks`、`max_ticks` | 机械安全范围，位于 −32767..32767，包含零位 |
+| `min_ticks`、`max_ticks` | 机械安全范围，位于 −32767..32767；实际标准姿态与运动目标须在范围内 |
 | `imu_mount` | 安装标定所得单位四元数 |
 | `speed_rad_s_per_unit` | HD1910 原始速度单位到 rad/s 的换算，需要手册或测量确认 |
 | `current_ma_per_unit` | 原始电流幅值到 mA 的换算，需要手册或测量确认 |

@@ -679,7 +679,9 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// v72 adds live port/gain settings and the explicit commissioning finish.
 /// API 73 adds independent peripheral selection and saved configuration reports.
 /// API 74 carries signed FT-SCS position/zero/limit ticks in robot.servoDebug.
-pub const API_VERSION: u32 = 74;
+/// API 75 reports motor output ceilings for low-output servo follow.
+/// API 76 adds reference-first guided commissioning and live follow output limits.
+pub const API_VERSION: u32 = 76;
 
 /// The observation width every policy this robot family runs is built against.
 ///

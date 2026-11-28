@@ -18,7 +18,8 @@ import type { DebugSession } from '@/lib/session'
 import type { Joint } from '@/lib/model'
 import { labels } from '@/lib/motion'
 import { PoseView } from './PoseView'
-import { canEditZero, POSITION_MIN_TICKS, POSITION_MAX_TICKS } from '@/lib/calibration'
+import { canEditZero, jointLimits, POSITION_MIN_TICKS, POSITION_MAX_TICKS } from '@/lib/calibration'
+import { referenceOffsetDegrees } from '@/lib/commissioning'
 
 interface SessionProps {
   session: DebugSession
@@ -78,7 +79,7 @@ export function Modes({ session }: SessionProps) {
           }}
         >
           {Object.entries(modes).map(([v, label]) => (
-            <ToggleGroupItem key={v} value={v}>
+            <ToggleGroupItem key={v} value={v} disabled={v === 'hold' && !state?.settings.every(jointLimits)}>
               {label}
             </ToggleGroupItem>
           ))}
@@ -95,7 +96,12 @@ export function Modes({ session }: SessionProps) {
           max={254}
           onValueChange={(v) => setP(v[0])}
         />
-        <FieldDescription>选择保持方式时应用。柔顺跟随仍可能因重力下垂。</FieldDescription>
+        <FieldDescription>选择保持方式时应用。柔顺跟随约移动 0.35° 后响应；输出上限在下方调节，仍需扶稳实物。</FieldDescription>
+      </Field>
+      <Field>
+        <FieldLabel id="follow-output-limit">跟随输出上限 <output>{((state?.follow_output_limit ?? 250) / 10).toFixed(0)}%</output></FieldLabel>
+        <FollowOutputSlider session={session} />
+        <FieldDescription>驱动输出上限，不是实测力矩。滑动结束后应用，0% 为卸力，不会提高舵机原有上限。</FieldDescription>
       </Field>
       <Button
         variant="outline"
@@ -108,6 +114,21 @@ export function Modes({ session }: SessionProps) {
       </Button>
     </FieldGroup>
   )
+}
+
+function FollowOutputSlider({ session }: SessionProps) {
+  const { state, busy, run } = session
+  const [draft, setDraft] = useState<number | null>(null)
+  const { act } = useFeedback()
+  return <div className="flex items-center gap-3">
+    <Slider aria-labelledby="follow-output-limit" value={[draft ?? (state?.follow_output_limit ?? 250) / 10]} min={0} max={100} step={1}
+      disabled={!state?.active || busy} onValueChange={v => setDraft(v[0])}
+      onValueCommit={v => { void (async () => {
+        await act(() => run('follow_limit', { limit: Math.round(v[0] * 10) }), '跟随输出上限已应用')
+        setDraft(null)
+      })() }} />
+    <span className="w-12 shrink-0 text-right text-sm tabular-nums">{draft ?? (state?.follow_output_limit ?? 250) / 10}%</span>
+  </div>
 }
 
 interface TableProps {
@@ -164,12 +185,12 @@ export function JointTable({ session, selected, onSelect, edit = true, applied }
             {[
               '关节 / ID',
               '编码器',
-              '角度',
               '扭矩',
               'P',
+              '输出上限',
               '电压 / 温度',
               '零位',
-              ...(edit ? ['方向', '最小位置', '最大位置'] : []),
+              '方向', '最小位置', '最大位置',
             ].map((v) => (
               <TableHead key={v}>{v}</TableHead>
             ))}
@@ -194,16 +215,24 @@ export function JointTable({ session, selected, onSelect, edit = true, applied }
                     labels[i] + ' / ' + j.id
                   )}
                 </TableCell>
-                <TableCell title={r?.error || undefined}>{r?.error ?? r?.ticks ?? '—'}</TableCell>
-                <TableCell>{angle}</TableCell>
+                <TableCell title={r?.error || undefined}>
+                  {r?.error ?? r?.ticks ?? '—'}
+                  {state.reference_ticks && <small className="block text-xs text-muted-foreground">
+                    {referenceOffsetDegrees(r?.ticks, state.reference_ticks[i], joint.direction) == null
+                      ? '已记录零点 · 方向待确认'
+                      : referenceOffsetDegrees(r?.ticks, state.reference_ticks[i], joint.direction)!.toFixed(2) + '° · 相对标准姿态'}
+                  </small>}
+                  {!state.reference_ticks && <small className="block text-xs text-muted-foreground">{angle}</small>}
+                </TableCell>
                 <TableCell>{r?.torque == null ? '未知' : r.torque ? '已使能' : '已卸力'}</TableCell>
                 <TableCell>{r?.p ?? '—'}</TableCell>
+                <TableCell>{r?.output_limit == null ? '—' : (r.output_limit / 10).toFixed(1) + '%'}</TableCell>
                 <TableCell>
                   {r?.voltage == null ? '—' : r.voltage.toFixed(1) + ' V'} /{' '}
                   {r?.temperature == null ? '—' : r.temperature + '°'}
                 </TableCell>
                 <TableCell>{j.zero_ticks ?? '—'}</TableCell>
-                {edit && (
+                {edit ? (
                   <>
                     <TableCell>
                       <Choice
@@ -213,8 +242,8 @@ export function JointTable({ session, selected, onSelect, edit = true, applied }
                         value={String(j.direction ?? 'unset')}
                         options={[
                           ['unset', '未设置'],
-                          ['1', '+1'],
-                          ['-1', '−1'],
+                          ['1', '正向'],
+                          ['-1', '反向'],
                         ]}
                         onChange={(v) => set(j.id, { direction: v === 'unset' ? null : Number(v) })}
                       />
@@ -240,7 +269,13 @@ export function JointTable({ session, selected, onSelect, edit = true, applied }
                       </TableCell>
                     ))}
                   </>
-                )}
+                ) : <>
+                  <TableCell>{j.direction === 1 ? '正向' : j.direction === -1 ? '反向' : '未确认'}{state.mirrored?.[i] && <small className="block text-xs text-muted-foreground">镜像推导</small>}</TableCell>
+                  {(['min_ticks', 'max_ticks'] as const).map(key => <TableCell key={key}>
+                    {j[key] ?? '—'}
+                    {state.reference_ticks && <small className="block text-xs text-muted-foreground">{referenceOffsetDegrees(j[key], state.reference_ticks[i], j.direction)?.toFixed(2) ?? '—'}°</small>}
+                  </TableCell>)}
+                </>}
               </TableRow>
             )
           })}

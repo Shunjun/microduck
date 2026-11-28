@@ -28,8 +28,6 @@ impl JointCalibration {
             || !crate::servo_debug::valid_position(self.zero_ticks)
             || !crate::servo_debug::valid_position(self.min_ticks)
             || !crate::servo_debug::valid_position(self.max_ticks)
-            || self.zero_ticks < self.min_ticks
-            || self.zero_ticks > self.max_ticks
         {
             return Err(fail(format!(
                 "invalid mechanical calibration for servo {}",
